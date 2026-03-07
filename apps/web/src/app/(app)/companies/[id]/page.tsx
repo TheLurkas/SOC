@@ -10,8 +10,7 @@ import {
 } from "@/components/ui/card";
 import { ArrowLeft } from "lucide-react";
 import { CreateWorkspaceDialog } from "@/components/create-workspace-dialog";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+import api from "@/lib/api";
 
 interface Workspace {
   id: string;
@@ -41,12 +40,10 @@ export default function CompanyPage({
 
   const fetchCompany = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/companies/${id}`, { credentials: "include" });
-      if (!res.ok) throw new Error("Company not found");
-      const json = await res.json();
+      const { data: json } = await api.get(`/companies/${id}`);
       setCompany(json.data);
     } catch (err: any) {
-      setError(err.message);
+      setError(err.response?.data?.message || err.message);
     } finally {
       setLoading(false);
     }

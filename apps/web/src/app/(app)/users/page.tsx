@@ -3,14 +3,12 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { CreateUserDialog } from "@/components/create-user-dialog";
+import { EditUserDialog } from "@/components/edit-user-dialog";
+import { Pencil, Trash2 } from "lucide-react";
+import api from "@/lib/api";
 
 interface User {
   id: string;
@@ -20,28 +18,24 @@ interface User {
   createdAt: string;
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-
 export default function UsersPage() {
   const router = useRouter();
+  const { data: session } = authClient.useSession();
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [editingUser, setEditingUser] = useState<User | null>(null);
 
   const fetchUsers = async () => {
     try {
-      const res = await fetch(`${API_URL}/users`, {
-        credentials: "include",
-      });
-      if (res.status === 403) {
+      const { data: json } = await api.get("/users");
+      setUsers(json.data);
+    } catch (err: any) {
+      if (err.response?.status === 403) {
         router.push("/dashboard");
         return;
       }
-      if (!res.ok) throw new Error("Failed to fetch users");
-      const json = await res.json();
-      setUsers(json.data);
-    } catch (err: any) {
-      setError(err.message);
+      setError(err.response?.data?.message || err.message);
     } finally {
       setLoading(false);
     }
@@ -50,6 +44,16 @@ export default function UsersPage() {
   useEffect(() => {
     fetchUsers();
   }, []);
+
+  const deleteUser = async (id: string, name: string) => {
+    if (!confirm(`Delete user "${name}"? This cannot be undone.`)) return;
+    try {
+      await api.delete(`/users/${id}`);
+      await fetchUsers();
+    } catch (err: any) {
+      setError(err.response?.data?.message || err.message);
+    }
+  };
 
   if (loading) {
     return (
@@ -87,33 +91,71 @@ export default function UsersPage() {
               <th className="text-left px-4 py-2 font-medium text-muted-foreground">Email</th>
               <th className="text-left px-4 py-2 font-medium text-muted-foreground">Role</th>
               <th className="text-left px-4 py-2 font-medium text-muted-foreground">Created</th>
+              <th className="w-20 px-4 py-2" />
             </tr>
           </thead>
           <tbody>
-            {users.map((user) => (
-              <tr key={user.id} className="border-b border-border last:border-0">
-                <td className="px-4 py-3">{user.name}</td>
-                <td className="px-4 py-3 text-muted-foreground">{user.email}</td>
-                <td className="px-4 py-3">
-                  <Badge
-                    variant="outline"
-                    className={
-                      user.role === "admin"
-                        ? "text-primary border-primary/30"
-                        : "text-muted-foreground border-border"
-                    }
-                  >
-                    {user.role}
-                  </Badge>
-                </td>
-                <td className="px-4 py-3 text-muted-foreground">
-                  {new Date(user.createdAt).toLocaleDateString()}
-                </td>
-              </tr>
-            ))}
+            {users.map((user) => {
+              const isSelf = session?.user?.id === user.id;
+
+              return (
+                <tr key={user.id} className="border-b border-border last:border-0 hover:bg-secondary/10 transition-colors">
+                  <td className="px-4 py-3">
+                    {user.name}
+                    {isSelf && <span className="text-muted-foreground ml-1.5 text-xs">(You)</span>}
+                  </td>
+                  <td className="px-4 py-3 text-muted-foreground">{user.email}</td>
+                  <td className="px-4 py-3">
+                    <Badge
+                      variant="outline"
+                      className={
+                        user.role === "admin"
+                          ? "text-primary border-primary/30"
+                          : "text-muted-foreground border-border"
+                      }
+                    >
+                      {user.role}
+                    </Badge>
+                  </td>
+                  <td className="px-4 py-3 text-muted-foreground">
+                    {new Date(user.createdAt).toLocaleDateString()}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-1">
+                      <Button
+                        size="icon-xs"
+                        variant="ghost"
+                        onClick={() => setEditingUser(user)}
+                        title="Edit user"
+                      >
+                        <Pencil className="size-3 text-muted-foreground" />
+                      </Button>
+                      {!isSelf && (
+                        <Button
+                          size="icon-xs"
+                          variant="ghost"
+                          onClick={() => deleteUser(user.id, user.name)}
+                          title="Delete user"
+                        >
+                          <Trash2 className="size-3 text-muted-foreground" />
+                        </Button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      <EditUserDialog
+        user={editingUser}
+        open={!!editingUser}
+        onOpenChange={(open) => { if (!open) setEditingUser(null); }}
+        onSaved={fetchUsers}
+        isSelf={editingUser?.id === session?.user?.id}
+      />
     </div>
   );
 }

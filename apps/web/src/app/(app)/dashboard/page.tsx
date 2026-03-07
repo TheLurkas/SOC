@@ -19,8 +19,7 @@ import { Bar, BarChart, XAxis, Area, AreaChart } from "recharts";
 import { Star, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { CreateCompanyDialog } from "@/components/create-company-dialog";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+import api from "@/lib/api";
 
 interface Company {
   id: string;
@@ -73,11 +72,10 @@ export default function Dashboard() {
 
   const fetchCompanies = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/companies`, { credentials: "include" });
-      if (res.ok) {
-        const json = await res.json();
-        setCompanies(json.data);
-      }
+      const { data: json } = await api.get("/companies");
+      setCompanies(json.data);
+    } catch {
+      // ignore
     } finally {
       setLoading(false);
     }
@@ -85,9 +83,9 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchCompanies();
-    fetch(`${API_URL}/favorites`, { credentials: "include" })
-      .then((res) => res.ok ? res.json() : { data: [] })
-      .then((json) => setFavorites(new Set(json.data)));
+    api.get("/favorites")
+      .then(({ data: json }) => setFavorites(new Set(json.data)))
+      .catch(() => {});
   }, [fetchCompanies]);
 
   const toggleFavorite = useCallback((id: string) => {
@@ -96,10 +94,10 @@ export default function Dashboard() {
       const isFav = next.has(id);
       if (isFav) {
         next.delete(id);
-        fetch(`${API_URL}/favorites/${id}`, { method: "DELETE", credentials: "include" });
+        api.delete(`/favorites/${id}`);
       } else {
         next.add(id);
-        fetch(`${API_URL}/favorites/${id}`, { method: "POST", credentials: "include" });
+        api.post(`/favorites/${id}`);
       }
       return next;
     });

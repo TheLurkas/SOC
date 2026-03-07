@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Dialog,
   DialogContent,
@@ -8,27 +8,47 @@ import {
   DialogTitle,
   DialogDescription,
   DialogFooter,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, Eye, EyeOff, RefreshCw } from "lucide-react";
+import { Eye, EyeOff, RefreshCw } from "lucide-react";
 import api from "@/lib/api";
 
-interface CreateUserDialogProps {
-  onCreated: () => void;
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
 }
 
-export function CreateUserDialog({ onCreated }: CreateUserDialogProps) {
-  const [open, setOpen] = useState(false);
+interface EditUserDialogProps {
+  user: User | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSaved: () => void;
+  isSelf: boolean;
+}
+
+export function EditUserDialog({ user, open, onOpenChange, onSaved, isSelf }: EditUserDialogProps) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [role, setRole] = useState("analyst");
+  const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (user) {
+      setName(user.name);
+      setEmail(user.email);
+      setRole(user.role);
+      setPassword("");
+      setShowPassword(false);
+      setError("");
+    }
+  }, [user]);
 
   const generatePassword = () => {
     const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%&*";
@@ -40,17 +60,25 @@ export function CreateUserDialog({ onCreated }: CreateUserDialogProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!user) return;
     setError("");
     setLoading(true);
 
     try {
-      await api.post("/users", { name, email, password, role });
-      setName("");
-      setEmail("");
-      setPassword("");
-      setRole("analyst");
-      setOpen(false);
-      onCreated();
+      const body: Record<string, string> = {};
+      if (name.trim() !== user.name) body.name = name.trim();
+      if (email.trim() !== user.email) body.email = email.trim();
+      if (role !== user.role) body.role = role;
+      if (password.trim()) body.password = password.trim();
+
+      if (Object.keys(body).length === 0) {
+        onOpenChange(false);
+        return;
+      }
+
+      await api.patch(`/users/${user.id}`, body);
+      onOpenChange(false);
+      onSaved();
     } catch (err: any) {
       setError(err.response?.data?.message || err.message);
     } finally {
@@ -59,20 +87,12 @@ export function CreateUserDialog({ onCreated }: CreateUserDialogProps) {
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger
-        render={
-          <Button size="sm" className="h-8 text-xs gap-1.5">
-            <Plus className="size-3.5" />
-            New User
-          </Button>
-        }
-      />
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Create User</DialogTitle>
+          <DialogTitle>Edit User</DialogTitle>
           <DialogDescription>
-            Add a new analyst or admin to the platform.
+            Update user details{isSelf ? " (your account)" : ""}.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -82,61 +102,26 @@ export function CreateUserDialog({ onCreated }: CreateUserDialogProps) {
             </p>
           )}
           <div className="space-y-2">
-            <Label htmlFor="user-name">Name</Label>
+            <Label htmlFor="edit-name">Name</Label>
             <Input
-              id="user-name"
-              placeholder="John Doe"
+              id="edit-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               required
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="user-email">Email</Label>
+            <Label htmlFor="edit-email">Email</Label>
             <Input
-              id="user-email"
+              id="edit-email"
               type="email"
-              placeholder="john@lurkas.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="user-password">Password</Label>
-            <div className="flex gap-1.5">
-              <div className="relative flex-1">
-                <Input
-                  id="user-password"
-                  type={showPassword ? "text" : "password"}
-                  placeholder="Minimum 8 characters"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  minLength={8}
-                  className="pr-8"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showPassword ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                </button>
-              </div>
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                onClick={generatePassword}
-                title="Generate random password"
-              >
-                <RefreshCw className="size-3.5" />
-              </Button>
-            </div>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="user-role">Role</Label>
+            <Label htmlFor="edit-role">Role</Label>
             <div className="flex gap-2">
               <button
                 type="button"
@@ -162,9 +147,45 @@ export function CreateUserDialog({ onCreated }: CreateUserDialogProps) {
               </button>
             </div>
           </div>
+          <div className="space-y-2">
+            <Label htmlFor="edit-password">New Password</Label>
+            <p className="text-[11px] text-muted-foreground">Leave blank to keep current password.</p>
+            <div className="flex gap-1.5">
+              <div className="relative flex-1">
+                <Input
+                  id="edit-password"
+                  type={showPassword ? "text" : "password"}
+                  placeholder="Minimum 8 characters"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  minLength={8}
+                  className="pr-8"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showPassword ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                </button>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={generatePassword}
+                title="Generate random password"
+              >
+                <RefreshCw className="size-3.5" />
+              </Button>
+            </div>
+          </div>
           <DialogFooter>
-            <Button type="submit" size="sm" disabled={loading || !name.trim() || !email.trim() || !password.trim()}>
-              {loading ? "Creating..." : "Create"}
+            <Button type="button" variant="outline" size="sm" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" size="sm" disabled={loading || !name.trim() || !email.trim()}>
+              {loading ? "Saving..." : "Save Changes"}
             </Button>
           </DialogFooter>
         </form>

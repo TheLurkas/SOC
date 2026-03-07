@@ -14,8 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Plus } from "lucide-react";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+import api from "@/lib/api";
 
 interface CreateCompanyDialogProps {
   onCreated: () => void;
@@ -34,24 +33,13 @@ export function CreateCompanyDialog({ onCreated }: CreateCompanyDialogProps) {
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_URL}/companies`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ name, contact: contactEmail }),
-      });
-
-      if (!res.ok) {
-        const json = await res.json();
-        throw new Error(json.message || "Failed to create company");
-      }
-
+      await api.post("/companies", { name, contact: contactEmail });
       setName("");
       setContactEmail("");
       setOpen(false);
       onCreated();
     } catch (err: any) {
-      setError(err.message);
+      setError(err.response?.data?.message || err.message);
     } finally {
       setLoading(false);
     }

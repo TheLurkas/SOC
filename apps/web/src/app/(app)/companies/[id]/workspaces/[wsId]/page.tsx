@@ -4,8 +4,7 @@ import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
 import { ArrowLeft } from "lucide-react";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+import api from "@/lib/api";
 
 interface WorkspaceDetail {
   id: string;
@@ -26,9 +25,9 @@ export default function WorkspacePage({
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`${API_URL}/companies/${id}/workspaces/${wsId}`, { credentials: "include" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((json) => json && setWorkspace(json.data))
+    api.get(`/companies/${id}/workspaces/${wsId}`)
+      .then(({ data: json }) => setWorkspace(json.data))
+      .catch(() => {})
       .finally(() => setLoading(false));
   }, [id, wsId]);
 

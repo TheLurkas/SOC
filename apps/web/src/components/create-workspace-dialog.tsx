@@ -14,8 +14,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Plus } from "lucide-react";
+import api from "@/lib/api";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
 interface CreateWorkspaceDialogProps {
   companyId: string;
@@ -35,24 +35,13 @@ export function CreateWorkspaceDialog({ companyId, onCreated }: CreateWorkspaceD
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_URL}/companies/${companyId}/workspaces`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ name, description }),
-      });
-
-      if (!res.ok) {
-        const json = await res.json();
-        throw new Error(json.message || "Failed to create workspace");
-      }
-
+      await api.post(`/companies/${companyId}/workspaces`, { name, description });
       setName("");
       setDescription("");
       setOpen(false);
       onCreated();
     } catch (err: any) {
-      setError(err.message);
+      setError(err.response?.data?.message || err.message);
     } finally {
       setLoading(false);
     }
