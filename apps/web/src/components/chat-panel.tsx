@@ -118,15 +118,16 @@ interface ChatPanelProps {
 export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>(mockMessages);
   const [input, setInput] = useState("");
+  const [isThinking, setIsThinking] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const contextLine = useContextLine();
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, isThinking]);
 
   const handleSend = () => {
-    if (!input.trim()) return;
+    if (!input.trim() || isThinking) return;
 
     const userMsg: Message = {
       id: Date.now().toString(),
@@ -135,6 +136,7 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
     };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
+    setIsThinking(true);
 
     setTimeout(() => {
       const reply: Message = {
@@ -144,7 +146,8 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
           "Analyzing workspace logs... No immediate threats detected matching your query. I checked across all active workspaces and found normal traffic patterns. Let me know if you want me to dig deeper into a specific timeframe or source.",
       };
       setMessages((prev) => [...prev, reply]);
-    }, 800);
+      setIsThinking(false);
+    }, 1500);
   };
 
   return (
@@ -184,6 +187,15 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
             </div>
           </div>
         ))}
+        {isThinking && (
+          <div className="flex justify-start">
+            <div className="bg-secondary rounded-md px-3 py-2 flex items-center gap-1">
+              <span className="size-1.5 rounded-full bg-muted-foreground animate-pulse" />
+              <span className="size-1.5 rounded-full bg-muted-foreground animate-pulse [animation-delay:150ms]" />
+              <span className="size-1.5 rounded-full bg-muted-foreground animate-pulse [animation-delay:300ms]" />
+            </div>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 
