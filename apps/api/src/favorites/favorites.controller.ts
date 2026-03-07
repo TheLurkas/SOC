@@ -1,23 +1,15 @@
-import { Controller, Get, Post, Delete, Param, Req, HttpException, HttpStatus } from '@nestjs/common';
-import { Request } from 'express';
+import { Controller, Get, Post, Delete, Param, UseGuards, HttpException, HttpStatus } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { auth } from '../auth/auth';
+import { AuthGuard } from '../common/guards/auth.guard';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 
 @Controller('favorites')
+@UseGuards(AuthGuard)
 export class FavoritesController {
   constructor(private readonly prisma: PrismaService) {}
 
-  private async requireUser(req: Request) {
-    const session = await auth.api.getSession({ headers: req.headers as any });
-    if (!session?.user) {
-      throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
-    }
-    return session.user;
-  }
-
   @Get()
-  async getFavorites(@Req() req: Request) {
-    const user = await this.requireUser(req);
+  async getFavorites(@CurrentUser() user: any) {
     const favorites = await this.prisma.favoriteCompany.findMany({
       where: { userId: user.id },
       select: { companyId: true },
@@ -26,9 +18,7 @@ export class FavoritesController {
   }
 
   @Post(':companyId')
-  async addFavorite(@Req() req: Request, @Param('companyId') companyId: string) {
-    const user = await this.requireUser(req);
-
+  async addFavorite(@CurrentUser() user: any, @Param('companyId') companyId: string) {
     const company = await this.prisma.company.findUnique({ where: { id: companyId } });
     if (!company) {
       throw new HttpException('Company not found', HttpStatus.NOT_FOUND);
@@ -44,9 +34,7 @@ export class FavoritesController {
   }
 
   @Delete(':companyId')
-  async removeFavorite(@Req() req: Request, @Param('companyId') companyId: string) {
-    const user = await this.requireUser(req);
-
+  async removeFavorite(@CurrentUser() user: any, @Param('companyId') companyId: string) {
     await this.prisma.favoriteCompany.deleteMany({
       where: { userId: user.id, companyId },
     });

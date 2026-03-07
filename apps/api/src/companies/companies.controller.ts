@@ -1,23 +1,15 @@
-import { Controller, Get, Post, Body, Param, Req, HttpException, HttpStatus } from '@nestjs/common';
-import { Request } from 'express';
+import { Controller, Get, Post, Body, Param, UseGuards, HttpException, HttpStatus } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { auth } from '../auth/auth';
+import { AuthGuard } from '../common/guards/auth.guard';
+import { AdminGuard } from '../common/guards/admin.guard';
 
 @Controller('companies')
+@UseGuards(AuthGuard)
 export class CompaniesController {
   constructor(private readonly prisma: PrismaService) {}
 
-  private async requireUser(req: Request) {
-    const session = await auth.api.getSession({ headers: req.headers as any });
-    if (!session?.user) {
-      throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
-    }
-    return session.user;
-  }
-
   @Get()
-  async list(@Req() req: Request) {
-    await this.requireUser(req);
+  async list() {
     const companies = await this.prisma.company.findMany({
       include: {
         _count: { select: { workspaces: true } },
@@ -37,8 +29,7 @@ export class CompaniesController {
   }
 
   @Get(':id')
-  async getById(@Req() req: Request, @Param('id') id: string) {
-    await this.requireUser(req);
+  async getById(@Param('id') id: string) {
     const company = await this.prisma.company.findUnique({
       where: { id },
       include: {
@@ -66,8 +57,8 @@ export class CompaniesController {
   }
 
   @Post()
-  async create(@Req() req: Request, @Body() body: { name: string; contact?: string }) {
-    await this.requireUser(req);
+  @UseGuards(AdminGuard)
+  async create(@Body() body: { name: string; contact?: string }) {
     const { name, contact } = body;
 
     if (!name?.trim()) {

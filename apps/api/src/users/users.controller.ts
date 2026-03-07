@@ -1,28 +1,18 @@
-import { Controller, Get, Post, Patch, Delete, Body, Param, Req, HttpException, HttpStatus } from '@nestjs/common';
-import { Request } from 'express';
+import { Controller, Get, Post, Patch, Delete, Body, Param, UseGuards, HttpException, HttpStatus } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { auth } from '../auth/auth';
+import { AuthGuard } from '../common/guards/auth.guard';
+import { AdminGuard } from '../common/guards/admin.guard';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { hashPassword } from 'better-auth/crypto';
+import { auth } from '../auth/auth';
 
 @Controller('users')
+@UseGuards(AuthGuard, AdminGuard)
 export class UsersController {
   constructor(private readonly prisma: PrismaService) {}
 
-  private async requireAdmin(req: Request) {
-    const session = await auth.api.getSession({ headers: req.headers as any });
-    if (!session?.user) {
-      throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
-    }
-    const user = await this.prisma.user.findUnique({ where: { id: session.user.id } });
-    if (user?.role !== 'admin') {
-      throw new HttpException('Forbidden', HttpStatus.FORBIDDEN);
-    }
-    return session.user;
-  }
-
   @Get()
-  async listUsers(@Req() req: Request) {
-    await this.requireAdmin(req);
+  async listUsers() {
     const users = await this.prisma.user.findMany({
       select: {
         id: true,
@@ -37,9 +27,7 @@ export class UsersController {
   }
 
   @Post()
-  async createUser(@Req() req: Request, @Body() body: { name: string; email: string; password: string; role: string }) {
-    await this.requireAdmin(req);
-
+  async createUser(@Body() body: { name: string; email: string; password: string; role: string }) {
     const { name, email, password, role } = body;
     if (!name || !email || !password) {
       throw new HttpException('Missing required fields', HttpStatus.BAD_REQUEST);
@@ -48,7 +36,6 @@ export class UsersController {
       throw new HttpException('Invalid role', HttpStatus.BAD_REQUEST);
     }
 
-    // Create user via Better Auth sign-up API
     const result = await auth.api.signUpEmail({
       body: { name, email, password },
     });
@@ -57,7 +44,6 @@ export class UsersController {
       throw new HttpException('Failed to create user', HttpStatus.BAD_REQUEST);
     }
 
-    // Update role if not default
     if (role && role !== 'analyst') {
       await this.prisma.user.update({
         where: { id: result.user.id },
@@ -75,12 +61,9 @@ export class UsersController {
 
   @Patch(':id')
   async updateUser(
-    @Req() req: Request,
     @Param('id') id: string,
     @Body() body: { name?: string; email?: string; role?: string; password?: string },
   ) {
-    await this.requireAdmin(req);
-
     const existing = await this.prisma.user.findUnique({ where: { id } });
     if (!existing) {
       throw new HttpException('User not found', HttpStatus.NOT_FOUND);
@@ -96,7 +79,6 @@ export class UsersController {
       data.role = body.role;
     }
 
-    // Update password in the account table
     if (body.password?.trim()) {
       if (body.password.trim().length < 8) {
         throw new HttpException('Password must be at least 8 characters', HttpStatus.BAD_REQUEST);
@@ -125,10 +107,8 @@ export class UsersController {
   }
 
   @Delete(':id')
-  async deleteUser(@Req() req: Request, @Param('id') id: string) {
-    const admin = await this.requireAdmin(req);
-
-    if (admin.id === id) {
+  async deleteUser(@CurrentUser() currentUser: any, @Param('id') id: string) {
+    if (currentUser.id === id) {
       throw new HttpException('Cannot delete yourself', HttpStatus.BAD_REQUEST);
     }
 

@@ -163,7 +163,7 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
         className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 z-50"
       />
       <div className="flex items-center justify-between px-4 h-10 border-b border-border shrink-0">
-        <span className="text-sm font-medium">Chat</span>
+        <span className="text-sm font-medium">Lurka</span>
         <button
           onClick={onClose}
           className="text-muted-foreground hover:text-foreground"
