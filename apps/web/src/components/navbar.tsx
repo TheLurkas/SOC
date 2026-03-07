@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { MessageSquare } from "lucide-react";
+import { MessageSquare, LogOut } from "lucide-react";
+import { authClient } from "@/lib/auth-client";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard" },
@@ -17,6 +18,9 @@ interface NavbarProps {
 
 export function Navbar({ onChatToggle, chatOpen }: NavbarProps) {
   const pathname = usePathname();
+  const router = useRouter();
+  const { data: session } = authClient.useSession();
+  const isAdmin = (session?.user as any)?.role === "admin";
 
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-background">
@@ -44,20 +48,44 @@ export function Navbar({ onChatToggle, chatOpen }: NavbarProps) {
               </Link>
             );
           })}
+          {isAdmin && (
+            <Link
+              href="/users"
+              className={cn(
+                "px-3 py-1 text-sm rounded-md transition-colors",
+                pathname.startsWith("/users")
+                  ? "text-foreground bg-secondary"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              Users
+            </Link>
+          )}
         </nav>
 
-        <button
-          onClick={onChatToggle}
-          className={cn(
-            "ml-auto flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors",
-            chatOpen
-              ? "text-foreground bg-secondary"
-              : "text-muted-foreground hover:text-foreground"
-          )}
-        >
-          <MessageSquare className="size-3.5" />
-          Chat
-        </button>
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            onClick={onChatToggle}
+            className={cn(
+              "flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors",
+              chatOpen
+                ? "text-foreground bg-secondary"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            <MessageSquare className="size-3.5" />
+            Chat
+          </button>
+          <button
+            onClick={async () => {
+              await authClient.signOut();
+              router.push("/login");
+            }}
+            className="flex items-center gap-1.5 px-3 py-1 text-sm rounded-md text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <LogOut className="size-3.5" />
+          </button>
+        </div>
       </div>
     </header>
   );

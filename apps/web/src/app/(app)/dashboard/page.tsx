@@ -20,6 +20,7 @@ import { Bar, BarChart, XAxis, Area, AreaChart } from "recharts";
 import { Star, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { mockCompanies, statusStyle, statusPriority } from "@/lib/mock-data";
+import { CreateCompanyDialog } from "@/components/create-company-dialog";
 
 const alertsData = [
   { day: "Mon", critical: 3, warning: 8, info: 12 },
@@ -145,6 +146,7 @@ export default function Dashboard() {
       <div className="space-y-3">
         <div className="flex items-center gap-3">
           <h2 className="text-sm font-medium text-muted-foreground">Companies</h2>
+          <CreateCompanyDialog />
           <div className="relative ml-auto w-64">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
             <Input

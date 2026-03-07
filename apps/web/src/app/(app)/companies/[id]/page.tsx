@@ -16,6 +16,7 @@ import {
   statusStyle,
   statusPriority,
 } from "@/lib/mock-data";
+import { CreateWorkspaceDialog } from "@/components/create-workspace-dialog";
 
 export default function CompanyPage({
   params,
@@ -60,7 +61,10 @@ export default function CompanyPage({
       </div>
 
       <div className="space-y-3">
-        <h2 className="text-sm font-medium text-muted-foreground">Workspaces</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-sm font-medium text-muted-foreground">Workspaces</h2>
+          <CreateWorkspaceDialog companyId={id} />
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {workspaces.map((ws) => (
             <Link key={ws.id} href={`/companies/${id}/workspaces/${ws.id}`}>
