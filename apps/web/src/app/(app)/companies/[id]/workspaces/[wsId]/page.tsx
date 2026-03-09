@@ -1,10 +1,11 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
 import { ArrowLeft, FileText } from "lucide-react";
 import api from "@/lib/api";
+import { useWorkspaceSocket } from "@/lib/socket";
 import type { WorkspaceDetailDto } from "@soc/shared";
 
 export default function WorkspacePage({
@@ -14,14 +15,28 @@ export default function WorkspacePage({
 }) {
   const { id, wsId } = use(params);
   const [workspace, setWorkspace] = useState<WorkspaceDetailDto | null>(null);
+  const [logCount, setLogCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+
+  const fetchStats = useCallback(() => {
+    api.get(`/logs/workspace/${wsId}/stats`)
+      .then(({ data: json }) => setLogCount(json.data.total))
+      .catch(() => {});
+  }, [wsId]);
 
   useEffect(() => {
     api.get(`/companies/${id}/workspaces/${wsId}`)
       .then(({ data: json }) => setWorkspace(json.data))
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [id, wsId]);
+    fetchStats();
+  }, [id, wsId, fetchStats]);
+
+  useWorkspaceSocket(wsId, {
+    onLogsIngested: () => fetchStats(),
+    onLogDeleted: () => fetchStats(),
+    onLogsCleared: () => fetchStats(),
+  });
 
   if (loading) {
     return (
@@ -57,8 +72,10 @@ export default function WorkspacePage({
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Card>
           <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Logs Today</p>
-            <p className="text-2xl font-semibold font-mono mt-1">0</p>
+            <p className="text-xs text-muted-foreground">Total Logs</p>
+            <p className="text-2xl font-semibold font-mono mt-1">
+              {logCount !== null ? logCount.toLocaleString() : "..."}
+            </p>
           </CardContent>
         </Card>
         <Card>

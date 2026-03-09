@@ -2,12 +2,16 @@ import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, Ht
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthGuard } from '../common/guards/auth.guard';
 import { AdminGuard } from '../common/guards/admin.guard';
+import { EventsGateway } from '../events/events.gateway';
 import type { IngestLogDto, UpdateLogDto } from '@soc/shared';
 
 @Controller('logs')
 @UseGuards(AuthGuard)
 export class LogsController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: EventsGateway,
+  ) {}
 
   @Post('ingest')
   async ingest(@Body() body: IngestLogDto | IngestLogDto[]) {
@@ -47,6 +51,11 @@ export class LogsController {
     }));
 
     const result = await this.prisma.log.createMany({ data });
+
+    for (const wsId of workspaceIds) {
+      const count = data.filter((d) => d.workspaceId === wsId).length;
+      this.events.emitLogsIngested({ workspaceId: wsId, count });
+    }
 
     return { data: { count: result.count } };
   }
@@ -260,6 +269,7 @@ export class LogsController {
     }
 
     const log = await this.prisma.log.update({ where: { id }, data });
+    this.events.emitLogUpdated({ workspaceId: existing.workspaceId, logId: id });
     return { data: log };
   }
 
@@ -272,6 +282,7 @@ export class LogsController {
     }
 
     await this.prisma.log.delete({ where: { id } });
+    this.events.emitLogDeleted({ workspaceId: existing.workspaceId, logId: id });
     return { data: { id } };
   }
 
@@ -284,6 +295,7 @@ export class LogsController {
     }
 
     const result = await this.prisma.log.deleteMany({ where: { workspaceId } });
+    this.events.emitLogsCleared({ workspaceId, deleted: result.count });
     return { data: { deleted: result.count } };
   }
 }

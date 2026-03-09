@@ -161,6 +161,37 @@ export interface LogStatsDto {
   volume: { time: string; count: number }[];
 }
 
+// ── WebSocket Events ────────────────────────────────────────
+
+export const WS_EVENTS = {
+  LOGS_INGESTED: 'logs:ingested',
+  LOG_UPDATED: 'log:updated',
+  LOG_DELETED: 'log:deleted',
+  LOGS_CLEARED: 'logs:cleared',
+  JOIN_WORKSPACE: 'workspace:join',
+  LEAVE_WORKSPACE: 'workspace:leave',
+} as const;
+
+export interface WsLogsIngestedPayload {
+  workspaceId: string;
+  count: number;
+}
+
+export interface WsLogUpdatedPayload {
+  workspaceId: string;
+  logId: string;
+}
+
+export interface WsLogDeletedPayload {
+  workspaceId: string;
+  logId: string;
+}
+
+export interface WsLogsClearedPayload {
+  workspaceId: string;
+  deleted: number;
+}
+
 // ── Chat DTOs ────────────────────────────────────────────────
 
 export interface MessageDto {

@@ -30,6 +30,7 @@ import {
   ArrowUpDown,
 } from "lucide-react";
 import api from "@/lib/api";
+import { useWorkspaceSocket } from "@/lib/socket";
 import type { LogDto, PaginationMeta, LogStatsDto } from "@soc/shared";
 
 const SEVERITY_COLORS: Record<string, string> = {
@@ -106,14 +107,18 @@ export default function LogsPage({
   const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
   const [workspace, setWorkspace] = useState<{ name: string; company: { id: string; name: string } } | null>(null);
 
+  const refreshStats = useCallback(() => {
+    api.get(`/logs/workspace/${wsId}/stats`)
+      .then(({ data: json }) => setStats(json.data))
+      .catch(() => {});
+  }, [wsId]);
+
   useEffect(() => {
     api.get(`/companies/${id}/workspaces/${wsId}`)
       .then(({ data: json }) => setWorkspace(json.data))
       .catch(() => {});
-    api.get(`/logs/workspace/${wsId}/stats`)
-      .then(({ data: json }) => setStats(json.data))
-      .catch(() => {});
-  }, [id, wsId]);
+    refreshStats();
+  }, [id, wsId, refreshStats]);
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
@@ -139,6 +144,13 @@ export default function LogsPage({
   useEffect(() => {
     fetchLogs();
   }, [fetchLogs]);
+
+  useWorkspaceSocket(wsId, {
+    onLogsIngested: () => { refreshStats(); fetchLogs(); },
+    onLogUpdated: () => { refreshStats(); fetchLogs(); },
+    onLogDeleted: () => { refreshStats(); fetchLogs(); },
+    onLogsCleared: () => { refreshStats(); fetchLogs(); },
+  });
 
   const displayedLogs = useMemo(() => {
     return sortDir === "asc" ? [...logs].reverse() : logs;

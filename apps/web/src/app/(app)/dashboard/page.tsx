@@ -20,6 +20,7 @@ import { Star, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { CreateCompanyDialog } from "@/components/create-company-dialog";
 import api from "@/lib/api";
+import { useGlobalSocket } from "@/lib/socket";
 import type { CompanyDto } from "@soc/shared";
 
 const alertsData = [
@@ -62,6 +63,7 @@ export default function Dashboard() {
   const [companies, setCompanies] = useState<CompanyDto[]>([]);
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const [totalLogs, setTotalLogs] = useState(0);
 
   const fetchCompanies = useCallback(async () => {
     try {
@@ -80,6 +82,11 @@ export default function Dashboard() {
       .then(({ data: json }) => setFavorites(new Set(json.data)))
       .catch(() => {});
   }, [fetchCompanies]);
+
+  useGlobalSocket({
+    onLogsIngested: (p) => setTotalLogs((prev) => prev + p.count),
+    onLogsCleared: () => setTotalLogs(0),
+  });
 
   const toggleFavorite = useCallback((id: string) => {
     setFavorites((prev) => {
@@ -114,7 +121,7 @@ export default function Dashboard() {
     { label: "Companies", value: String(companies.length) },
     { label: "Workspaces", value: String(totalWorkspaces) },
     { label: "Open Alerts", value: "0" },
-    { label: "Logs (24h)", value: "0" },
+    { label: "Logs (live)", value: totalLogs.toLocaleString() },
   ];
 
   return (

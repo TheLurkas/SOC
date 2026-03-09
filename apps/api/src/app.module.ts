@@ -7,9 +7,10 @@ import { FavoritesModule } from './favorites/favorites.module';
 import { CompaniesModule } from './companies/companies.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
 import { LogsModule } from './logs/logs.module';
+import { EventsModule } from './events/events.module';
 
 @Module({
-  imports: [PrismaModule, UsersModule, FavoritesModule, CompaniesModule, WorkspacesModule, LogsModule],
+  imports: [PrismaModule, EventsModule, UsersModule, FavoritesModule, CompaniesModule, WorkspacesModule, LogsModule],
   controllers: [AppController],
   providers: [AppService],
 })
