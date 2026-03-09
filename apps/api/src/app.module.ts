@@ -8,9 +8,10 @@ import { CompaniesModule } from './companies/companies.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
 import { LogsModule } from './logs/logs.module';
 import { EventsModule } from './events/events.module';
+import { ChatModule } from './chat/chat.module';
 
 @Module({
-  imports: [PrismaModule, EventsModule, UsersModule, FavoritesModule, CompaniesModule, WorkspacesModule, LogsModule],
+  imports: [PrismaModule, EventsModule, UsersModule, FavoritesModule, CompaniesModule, WorkspacesModule, LogsModule, ChatModule],
   controllers: [AppController],
   providers: [AppService],
 })

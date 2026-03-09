@@ -1,75 +1,51 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { usePathname } from "next/navigation";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { X, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { mockCompanies, mockWorkspaces } from "@/lib/mock-data";
+import api from "@/lib/api";
 import type { MessageDto } from "@soc/shared";
 
-const mockMessages: MessageDto[] = [
-  {
-    id: "1",
-    role: "user",
-    content: "Are there any brute force attempts on Global Finance?",
-  },
-  {
-    id: "2",
-    role: "assistant",
-    content:
-      "I found 47 failed SSH login attempts from 192.168.1.100 targeting the Global Finance production workspace in the last 2 hours. The attempts are targeting the root account across 3 different hosts. This pattern is consistent with a brute force attack. I recommend blocking the source IP immediately.",
-  },
-  {
-    id: "3",
-    role: "user",
-    content: "What about MedSecure Health?",
-  },
-  {
-    id: "4",
-    role: "assistant",
-    content:
-      "MedSecure Health has 12 open alerts. The most critical are 3 unauthorized access attempts to the patient database from an external IP (203.0.113.42). There are also 5 firewall rule violations on port 3306 and 4 anomalous outbound data transfers detected in the last hour.",
-  },
-];
-
-function useContextLine(): string {
+function usePageContext() {
   const pathname = usePathname();
 
-  // workspace page
   const wsMatch = pathname.match(/^\/companies\/([^/]+)\/workspaces\/([^/]+)/);
-  if (wsMatch) {
-    const company = mockCompanies.find((c) => c.id === wsMatch[1]);
-    const workspace = mockWorkspaces.find((w) => w.id === wsMatch[2]);
-    if (company && workspace) {
-      return `Reading ${workspace.name} · ${company.name} · ${workspace.logsToday.toLocaleString()} logs today`;
-    }
-  }
+  if (wsMatch) return { companyId: wsMatch[1], workspaceId: wsMatch[2] };
 
-  // company page
   const companyMatch = pathname.match(/^\/companies\/([^/]+)/);
-  if (companyMatch) {
-    const company = mockCompanies.find((c) => c.id === companyMatch[1]);
-    if (company) {
-      const ws = mockWorkspaces.filter((w) => w.companyId === company.id);
-      if (ws.length === 1) {
-        return `Reading ${ws[0].name} · ${company.name}`;
-      }
-      const totalLogs = ws.reduce((sum, w) => sum + w.logsToday, 0);
-      return `Reading ${ws.length} workspaces · ${company.name} · ${totalLogs.toLocaleString()} logs`;
+  if (companyMatch) return { companyId: companyMatch[1], workspaceId: undefined };
+
+  return { companyId: undefined, workspaceId: undefined };
+}
+
+function useContextLine() {
+  const pathname = usePathname();
+  const { companyId, workspaceId } = usePageContext();
+  const [label, setLabel] = useState("Monitoring all companies");
+
+  useEffect(() => {
+    if (workspaceId && companyId) {
+      api.get(`/companies/${companyId}/workspaces/${workspaceId}`)
+        .then(({ data: json }) => {
+          const ws = json.data;
+          setLabel(`Scoped to ${ws.name} · ${ws.company?.name || companyId}`);
+        })
+        .catch(() => setLabel(`Scoped to workspace ${workspaceId.slice(0, 8)}...`));
+    } else if (companyId) {
+      api.get(`/companies/${companyId}`)
+        .then(({ data: json }) => setLabel(`Scoped to ${json.data.name}`))
+        .catch(() => setLabel(`Scoped to company ${companyId.slice(0, 8)}...`));
+    } else if (pathname === "/alerts") {
+      setLabel("Monitoring alerts across all companies");
+    } else {
+      setLabel("Monitoring all companies");
     }
-  }
+  }, [pathname, companyId, workspaceId]);
 
-  if (pathname === "/alerts") {
-    const totalAlerts = mockCompanies.reduce((sum, c) => sum + c.alerts, 0);
-    return `Monitoring ${totalAlerts} alerts across ${mockCompanies.length} companies`;
-  }
-
-  // fallback to dashboard summary
-  const totalWorkspaces = mockWorkspaces.length;
-  const totalLogs = mockWorkspaces.reduce((sum, w) => sum + w.logsToday, 0);
-  return `Monitoring ${mockCompanies.length} companies · ${totalWorkspaces} workspaces · ${totalLogs.toLocaleString()} logs`;
+  return label;
 }
 
 function ContextBar({ text }: { text: string }) {
@@ -110,39 +86,54 @@ interface ChatPanelProps {
 }
 
 export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProps) {
-  const [messages, setMessages] = useState<MessageDto[]>(mockMessages);
+  const [messages, setMessages] = useState<MessageDto[]>([]);
   const [input, setInput] = useState("");
   const [isThinking, setIsThinking] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const contextLine = useContextLine();
+  const { companyId, workspaceId } = usePageContext();
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isThinking]);
 
-  const handleSend = () => {
-    if (!input.trim() || isThinking) return;
+  const handleSend = useCallback(async () => {
+    const text = input.trim();
+    if (!text || isThinking) return;
 
     const userMsg: MessageDto = {
       id: Date.now().toString(),
       role: "user",
-      content: input.trim(),
+      content: text,
     };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setIsThinking(true);
 
-    setTimeout(() => {
+    try {
+      const { data: json } = await api.post("/chat", {
+        message: text,
+        companyId,
+        workspaceId,
+        history: messages.slice(-10),
+      });
+
       const reply: MessageDto = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content:
-          "Analyzing workspace logs... No immediate threats detected matching your query. I checked across all active workspaces and found normal traffic patterns. Let me know if you want me to dig deeper into a specific timeframe or source.",
+        content: json.data.reply,
       };
       setMessages((prev) => [...prev, reply]);
+    } catch (err: any) {
+      const errMsg = err?.response?.data?.message || "Failed to get response. Check your API key and try again.";
+      setMessages((prev) => [
+        ...prev,
+        { id: (Date.now() + 1).toString(), role: "assistant", content: errMsg },
+      ]);
+    } finally {
       setIsThinking(false);
-    }, 1500);
-  };
+    }
+  }, [input, isThinking, companyId, workspaceId, messages]);
 
   return (
     <div
@@ -167,11 +158,16 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {messages.length === 0 && !isThinking && (
+          <div className="flex items-center justify-center h-full">
+            <p className="text-sm text-muted-foreground">Ask me about your logs</p>
+          </div>
+        )}
         {messages.map((msg) => (
           <div key={msg.id} className={cn("flex", msg.role === "user" ? "justify-end" : "justify-start")}>
             <div
               className={cn(
-                "max-w-[85%] rounded-md px-3 py-2 text-sm",
+                "max-w-[85%] rounded-md px-3 py-2 text-sm whitespace-pre-wrap",
                 msg.role === "user"
                   ? "bg-primary text-primary-foreground"
                   : "bg-secondary text-secondary-foreground"
@@ -207,7 +203,7 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
             onChange={(e) => setInput(e.target.value)}
             className="h-8 text-sm"
           />
-          <Button type="submit" size="icon" className="size-8 shrink-0">
+          <Button type="submit" size="icon" className="size-8 shrink-0" disabled={isThinking}>
             <Send className="size-3.5" />
           </Button>
         </form>

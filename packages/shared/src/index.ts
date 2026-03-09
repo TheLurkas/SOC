@@ -199,3 +199,15 @@ export interface MessageDto {
   role: 'user' | 'assistant';
   content: string;
 }
+
+export interface ChatRequestDto {
+  message: string;
+  companyId?: string;
+  workspaceId?: string;
+  history?: MessageDto[];
+}
+
+export interface ChatResponseDto {
+  reply: string;
+  logsUsed: number;
+}
