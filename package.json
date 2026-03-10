@@ -1,6 +1,9 @@
 {
   "name": "soc-platform",
   "private": true,
+  "pnpm": {
+    "onlyBuiltDependencies": ["@prisma/engines", "prisma", "sharp", "unrs-resolver"]
+  },
   "scripts": {
     "dev": "pnpm --filter @soc/shared build && pnpm --parallel --filter web --filter api dev",
     "dev:web": "pnpm --filter web dev",

@@ -25,8 +25,8 @@ export function Navbar({ onChatToggle, chatOpen }: NavbarProps) {
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-background">
       <div className="flex h-12 items-center px-6 gap-8">
-        <Link href="/dashboard" className="text-sm font-semibold tracking-tight">
-          Lurkas
+        <Link href="/dashboard" className="flex items-center gap-2">
+          <img src="/logo.png" alt="Lurkas" className="h-10" />
         </Link>
 
         <nav className="flex items-center gap-1">

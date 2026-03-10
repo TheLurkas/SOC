@@ -51,8 +51,8 @@ export default function LoginPage() {
 
       <div className="relative w-full max-w-xs space-y-8">
         {/* Branding */}
-        <div className="space-y-1">
-          <h1 className="text-lg font-semibold tracking-tight">Lurkas</h1>
+        <div className="flex flex-col items-center space-y-3">
+          <img src="/logo.png" alt="Lurkas" className="w-96" />
           <p className="text-xs text-muted-foreground">
             Security Operations Center
           </p>
