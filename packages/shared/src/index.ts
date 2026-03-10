@@ -215,15 +215,29 @@ export interface ConversationDetailDto extends ConversationDto {
   messages: MessageDto[];
 }
 
+export interface ChatMention {
+  type: 'company' | 'workspace';
+  id: string;
+  name: string;
+}
+
 export interface ChatRequestDto {
   message: string;
   conversationId?: string;
   companyId?: string;
   workspaceId?: string;
+  mentions?: ChatMention[];
 }
 
 export interface ChatResponseDto {
   conversationId: string;
+  title?: string;
   message: MessageDto;
   logsUsed: number;
+}
+
+export interface MentionSuggestionDto {
+  type: 'company' | 'workspace';
+  id: string;
+  name: string;
 }

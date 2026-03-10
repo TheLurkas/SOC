@@ -1,6 +1,6 @@
 import { Injectable, Logger, HttpException, HttpStatus } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import type { ChatRequestDto, ChatResponseDto, MessageDto, ConversationDto, ConversationDetailDto } from '@soc/shared';
+import type { ChatRequestDto, ChatResponseDto, MessageDto, ConversationDto, ConversationDetailDto, MentionSuggestionDto, ChatMention } from '@soc/shared';
 
 const CHUTES_BASE_URL = process.env.CHUTES_BASE_URL || 'https://llm.chutes.ai/v1';
 const CHUTES_MODEL = process.env.CHUTES_MODEL || 'Qwen/Qwen2.5-72B-Instruct';
@@ -95,10 +95,60 @@ export class ChatService {
     await this.prisma.conversation.delete({ where: { id: conversationId } });
   }
 
+  // ── @mention autocomplete ──────────────────────────────────
+
+  async getSuggestions(query: string, companyId?: string, workspaceId?: string): Promise<MentionSuggestionDto[]> {
+    const results: MentionSuggestionDto[] = [];
+
+    if (workspaceId && companyId) {
+      // inside a workspace: suggest sibling workspaces of the same company
+      const workspaces = await this.prisma.workspace.findMany({
+        where: { companyId, name: { contains: query, mode: 'insensitive' } },
+        take: 10,
+        orderBy: { name: 'asc' },
+      });
+      for (const ws of workspaces) {
+        results.push({ type: 'workspace', id: ws.id, name: ws.name });
+      }
+    } else if (companyId) {
+      // inside a company: suggest workspaces of this company
+      const workspaces = await this.prisma.workspace.findMany({
+        where: { companyId, name: { contains: query, mode: 'insensitive' } },
+        take: 10,
+        orderBy: { name: 'asc' },
+      });
+      for (const ws of workspaces) {
+        results.push({ type: 'workspace', id: ws.id, name: ws.name });
+      }
+    } else {
+      // dashboard: suggest companies first, then workspaces
+      const companies = await this.prisma.company.findMany({
+        where: { name: { contains: query, mode: 'insensitive' } },
+        take: 8,
+        orderBy: { name: 'asc' },
+      });
+      for (const c of companies) {
+        results.push({ type: 'company', id: c.id, name: c.name });
+      }
+
+      const workspaces = await this.prisma.workspace.findMany({
+        where: { name: { contains: query, mode: 'insensitive' } },
+        take: 5,
+        orderBy: { name: 'asc' },
+        include: { company: { select: { name: true } } },
+      });
+      for (const ws of workspaces) {
+        results.push({ type: 'workspace', id: ws.id, name: `${ws.name} (${ws.company.name})` });
+      }
+    }
+
+    return results;
+  }
+
   // ── Send message (the main flow) ──────────────────────────
 
   async sendMessage(userId: string, dto: ChatRequestDto): Promise<ChatResponseDto> {
-    const { message, conversationId, companyId, workspaceId } = dto;
+    const { message, conversationId, companyId, workspaceId, mentions } = dto;
 
     // get or create conversation
     let convo: any;
@@ -139,10 +189,10 @@ export class ChatService {
     const effectiveWorkspaceId = workspaceId || convo.workspaceId;
 
     // call 1: generate query
-    const queryJson = await this.generateQuery(message, effectiveCompanyId, effectiveWorkspaceId, history);
+    const queryJson = await this.generateQuery(message, effectiveCompanyId, effectiveWorkspaceId, history, mentions);
 
-    // execute query
-    const logs = await this.executePrismaQuery(queryJson, effectiveCompanyId, effectiveWorkspaceId);
+    // execute query — mentions override scope
+    const logs = await this.executePrismaQuery(queryJson, effectiveCompanyId, effectiveWorkspaceId, mentions);
 
     // call 2: generate answer
     const reply = await this.generateAnswer(message, logs, history);
@@ -157,12 +207,12 @@ export class ChatService {
       },
     });
 
-    // auto-title on first message
+    // auto-title on first message, then bump updatedAt
+    let title: string | undefined;
     if (convo.messages.length === 0) {
-      this.generateTitle(message, convo.id).catch(() => {});
+      title = await this.generateTitle(message, convo.id);
     }
 
-    // bump updatedAt
     await this.prisma.conversation.update({
       where: { id: convo.id },
       data: { updatedAt: new Date() },
@@ -170,6 +220,7 @@ export class ChatService {
 
     return {
       conversationId: convo.id,
+      title,
       message: {
         id: assistantMsg.id,
         role: 'assistant',
@@ -181,9 +232,9 @@ export class ChatService {
     };
   }
 
-  // ── Title generation (fire and forget) ────────────────────
+  // ── Title generation ────────────────────────────────────────
 
-  private async generateTitle(firstMessage: string, conversationId: string) {
+  private async generateTitle(firstMessage: string, conversationId: string): Promise<string | undefined> {
     try {
       const raw = await this.callLlm([
         {
@@ -197,8 +248,10 @@ export class ChatService {
         where: { id: conversationId },
         data: { title },
       });
+      return title;
     } catch (err) {
       this.logger.warn(`Failed to generate title: ${err}`);
+      return undefined;
     }
   }
 
@@ -209,11 +262,31 @@ export class ChatService {
     companyId?: string | null,
     workspaceId?: string | null,
     history?: MessageDto[],
+    mentions?: ChatMention[],
   ): Promise<any> {
     const contextParts: string[] = [];
-    if (workspaceId) contextParts.push(`The user is viewing workspace ID: "${workspaceId}"`);
-    else if (companyId) contextParts.push(`The user is viewing company ID: "${companyId}". Query logs across ALL workspaces belonging to this company.`);
-    else contextParts.push('No specific workspace/company selected. Query across all logs.');
+
+    // mentions override normal scope
+    if (mentions?.length) {
+      const companyMentions = mentions.filter((m) => m.type === 'company');
+      const workspaceMentions = mentions.filter((m) => m.type === 'workspace');
+      if (workspaceMentions.length) {
+        const ids = workspaceMentions.map((m) => `"${m.id}"`).join(', ');
+        const names = workspaceMentions.map((m) => m.name).join(', ');
+        contextParts.push(`The user mentioned specific workspaces: ${names}. Filter by workspaceId IN [${ids}].`);
+      }
+      if (companyMentions.length) {
+        const ids = companyMentions.map((m) => `"${m.id}"`).join(', ');
+        const names = companyMentions.map((m) => m.name).join(', ');
+        contextParts.push(`The user mentioned specific companies: ${names}. Filter by workspace: { companyId: { in: [${ids}] } }.`);
+      }
+    } else if (workspaceId) {
+      contextParts.push(`The user is viewing workspace ID: "${workspaceId}"`);
+    } else if (companyId) {
+      contextParts.push(`The user is viewing company ID: "${companyId}". Query logs across ALL workspaces belonging to this company.`);
+    } else {
+      contextParts.push('No specific workspace/company selected. Query across all logs.');
+    }
 
     const systemPrompt = `You are a database query assistant for a SOC (Security Operations Center) platform.
 Given a user's question about security logs, generate a Prisma "where" clause (as JSON) and optional ordering/limit to retrieve the relevant logs.
@@ -227,9 +300,10 @@ RULES:
 - "orderBy" defaults to { "timestamp": "desc" } if not specified.
 - "take" is optional. Omit it to retrieve ALL matching logs. Only set it if the user explicitly asks for a specific number (e.g. "show me the last 50").
 - ${contextParts.join(' ')}
-- ${workspaceId ? `Always include workspaceId: "${workspaceId}" in the where clause.` : ''}
-- ${companyId && !workspaceId ? `To filter by company, use: workspace: { companyId: "${companyId}" }` : ''}
+- ${!mentions?.length && workspaceId ? `Always include workspaceId: "${workspaceId}" in the where clause.` : ''}
+- ${!mentions?.length && companyId && !workspaceId ? `To filter by company, use: workspace: { companyId: "${companyId}" }` : ''}
 - For time-based queries, "timestamp" is Unix epoch (seconds). Current time is approximately ${Math.floor(Date.now() / 1000)}.
+- When the user mentions dates/times, assume they are referring to Europe/Athens (Greece) timezone (UTC+2 / UTC+3 DST). Convert accordingly to Unix epoch.
 - Use Prisma operators: equals, not, in, notIn, lt, lte, gt, gte, contains (for string search), mode: "insensitive" for case-insensitive.
 - For "latest" or "recent" queries without a specific count, just use orderBy desc without a take limit.
 - For severity filtering, valid values are: unknown, low, medium, high, critical (lowercase).
@@ -263,10 +337,22 @@ RULES:
 
   // ── Query execution ───────────────────────────────────────
 
-  private async executePrismaQuery(queryJson: any, companyId?: string | null, workspaceId?: string | null) {
+  private async executePrismaQuery(queryJson: any, companyId?: string | null, workspaceId?: string | null, mentions?: ChatMention[]) {
     const { where = {}, orderBy = { timestamp: 'desc' }, take } = queryJson;
 
-    if (workspaceId) {
+    if (mentions?.length) {
+      // mentions override normal scoping
+      const wsIds = mentions.filter((m) => m.type === 'workspace').map((m) => m.id);
+      const coIds = mentions.filter((m) => m.type === 'company').map((m) => m.id);
+      const conditions: any[] = [];
+      if (wsIds.length) conditions.push({ workspaceId: { in: wsIds } });
+      if (coIds.length) conditions.push({ workspace: { companyId: { in: coIds } } });
+      if (conditions.length === 1) {
+        Object.assign(where, conditions[0]);
+      } else if (conditions.length > 1) {
+        where.OR = conditions;
+      }
+    } else if (workspaceId) {
       where.workspaceId = workspaceId;
     } else if (companyId) {
       where.workspace = { ...where.workspace, companyId };
@@ -368,10 +454,13 @@ RULES:
 You help security analysts investigate logs, identify threats, and understand network activity.
 
 RULES:
-- Be concise and professional. No fluff.
-- Reference specific data from the logs (IPs, timestamps, counts, patterns).
-- If the logs show something suspicious, highlight it clearly.
-- If the logs look normal, say so. Don't invent threats.
+- Answer ONLY the user's question directly. Do not volunteer extra information, statistics, or analysis they didn't ask for.
+- The only exception: if you spot something genuinely critical or alarming in the data (e.g. active breach, suspicious exfiltration pattern), briefly mention it.
+- Be concise and professional. No fluff, no filler, no "here's a summary" preambles.
+- Reference specific data from the logs (IPs, timestamps, counts, patterns) when relevant to the question.
+- When presenting timestamps or dates to the user, always show them in Europe/Athens (Greece) timezone in a natural human-readable format (e.g. "March 10 at 14:35", "yesterday at 09:12", "last Tuesday"). Never show raw Unix timestamps or UTC ISO strings.
+- If the logs show something suspicious and the user asked about it, highlight it clearly.
+- If the logs look normal, say so briefly. Don't invent threats.
 - Use plain text. No markdown headers. Keep paragraphs short.
 - When mentioning counts, be precise based on the data provided.
 - You have aggregated stats and a sample of the ${logs.length} logs retrieved. Use both to answer.
