@@ -2,7 +2,6 @@
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { usePathname } from "next/navigation";
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { X, Send, Plus, Trash2, MessageSquare, ChevronLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -48,66 +47,48 @@ function useContextLine() {
   return label;
 }
 
-// highlights @mentions in message bubbles — uses exact name matching when names are known
-function renderWithMentions(text: string, isUser: boolean, knownNames?: string[]) {
+// highlights @mentions by matching against known entity names
+function renderWithMentions(text: string, isUser: boolean, knownNames: string[]) {
+  if (!knownNames.length) return text;
+
   const parts: (string | React.ReactNode)[] = [];
   let remaining = text;
   let keyIdx = 0;
 
-  if (knownNames?.length) {
-    // exact matching against known mention names (handles spaces in names)
-    while (remaining.length > 0) {
-      let earliestIdx = -1;
-      let earliestName = "";
+  while (remaining.length > 0) {
+    let earliestIdx = -1;
+    let earliestName = "";
 
-      for (const name of knownNames) {
-        const idx = remaining.indexOf(`@${name}`);
-        if (idx !== -1 && (earliestIdx === -1 || idx < earliestIdx)) {
-          earliestIdx = idx;
-          earliestName = name;
-        }
+    for (const name of knownNames) {
+      const idx = remaining.indexOf(`@${name}`);
+      if (idx !== -1 && (earliestIdx === -1 || idx < earliestIdx)) {
+        earliestIdx = idx;
+        earliestName = name;
       }
-
-      if (earliestIdx === -1) {
-        parts.push(remaining);
-        break;
-      }
-
-      if (earliestIdx > 0) parts.push(remaining.slice(0, earliestIdx));
-
-      parts.push(
-        <span key={keyIdx++} className={cn(
-          "rounded px-1 py-0.5 font-medium",
-          isUser ? "bg-white/20 text-primary-foreground" : "bg-primary/15 text-primary"
-        )}>@{earliestName}</span>
-      );
-
-      remaining = remaining.slice(earliestIdx + 1 + earliestName.length);
     }
 
-    return parts.length > 0 ? parts : text;
-  }
+    if (earliestIdx === -1) {
+      parts.push(remaining);
+      break;
+    }
 
-  // fallback regex for historical messages (best-effort, may not handle spaces in names)
-  const mentionRegex = /@([\w().-]+(?:\s[\w().-]+)*)/g;
-  let match;
-  let lastIndex = 0;
-  while ((match = mentionRegex.exec(text)) !== null) {
-    if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index));
+    if (earliestIdx > 0) parts.push(remaining.slice(0, earliestIdx));
+
     parts.push(
       <span key={keyIdx++} className={cn(
         "rounded px-1 py-0.5 font-medium",
         isUser ? "bg-white/20 text-primary-foreground" : "bg-primary/15 text-primary"
-      )}>@{match[1]}</span>
+      )}>@{earliestName}</span>
     );
-    lastIndex = match.index + match[0].length;
+
+    remaining = remaining.slice(earliestIdx + 1 + earliestName.length);
   }
-  if (lastIndex < text.length) parts.push(text.slice(lastIndex));
+
   return parts.length > 0 ? parts : text;
 }
 
-// highlights mentions in the chat input with a colored background
-function renderInputHighlight(text: string, activeMentions: ChatMention[]) {
+// overlay for the textarea — no padding on spans so character widths stay identical
+function renderInputWithMentions(text: string, activeMentions: ChatMention[]) {
   if (!activeMentions.length) return <span className="text-foreground">{text}</span>;
 
   const parts: (string | React.ReactNode)[] = [];
@@ -136,7 +117,7 @@ function renderInputHighlight(text: string, activeMentions: ChatMention[]) {
     }
 
     parts.push(
-      <span key={keyIdx++} className="rounded bg-primary/15 text-primary px-0.5 font-medium">
+      <span key={keyIdx++} className="text-primary font-medium">
         @{earliestName}
       </span>
     );
@@ -162,13 +143,13 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
   const [isThinking, setIsThinking] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
   const [mentions, setMentions] = useState<ChatMention[]>([]);
-  const [usedMentionNames, setUsedMentionNames] = useState<string[]>([]);
+  const [allEntityNames, setAllEntityNames] = useState<string[]>([]);
   const [suggestions, setSuggestions] = useState<MentionSuggestionDto[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
   const [selectedSuggestion, setSelectedSuggestion] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const suggestionsDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contextLine = useContextLine();
   const { companyId, workspaceId } = usePageContext();
@@ -181,6 +162,13 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
 
   useEffect(() => {
     loadConversations();
+    // fetch all company/workspace names for mention highlighting
+    api.get("/chat/suggestions", { params: { q: "" } })
+      .then(({ data: json }) => {
+        const names = (json.data as MentionSuggestionDto[]).map((s) => s.name);
+        setAllEntityNames(names);
+      })
+      .catch(() => {});
   }, [loadConversations]);
 
   useEffect(() => {
@@ -225,15 +213,19 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
 
     if (atIdx !== -1) {
       const query = value.slice(atIdx + 1);
-      // close if the user typed a space after a non-matched query
-      if (!query.includes(" ")) {
+      // allow spaces in query if it's a partial match of a known entity name
+      const hasSpaces = query.includes(" ");
+      const isPartialMatch = hasSpaces && allEntityNames.some((n) =>
+        n.toLowerCase().startsWith(query.toLowerCase())
+      );
+      if (!hasSpaces || isPartialMatch) {
         setMentionQuery(query);
         setShowSuggestions(true);
         return;
       }
     }
     setShowSuggestions(false);
-  }, [mentions]);
+  }, [mentions, allEntityNames]);
 
   const selectSuggestion = useCallback((suggestion: MentionSuggestionDto) => {
     // replace @query with @name in input
@@ -256,6 +248,13 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
   }, []);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // enter sends, shift+enter adds newline
+    if (e.key === "Enter" && !e.shiftKey && !showSuggestions) {
+      e.preventDefault();
+      handleSend();
+      return;
+    }
+
     if (!showSuggestions || suggestions.length === 0) return;
 
     if (e.key === "ArrowDown") {
@@ -278,7 +277,6 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
       setActiveConvoId(id);
       setMessages(json.data.messages);
       setMentions([]);
-      setUsedMentionNames([]);
       setShowSidebar(false);
     } catch {}
   }, []);
@@ -287,7 +285,6 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
     setActiveConvoId(null);
     setMessages([]);
     setMentions([]);
-    setUsedMentionNames([]);
     setShowSidebar(false);
   }, []);
 
@@ -314,6 +311,7 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
     };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
+    if (inputRef.current) inputRef.current.style.height = "32px";
     setIsThinking(true);
     setShowSuggestions(false);
 
@@ -348,13 +346,6 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
       }
 
       setMessages((prev) => [...prev, reply]);
-      // remember mention names so we can highlight them in both user and assistant messages
-      if (mentions.length > 0) {
-        setUsedMentionNames((prev) => {
-          const newNames = mentions.map((m) => m.name).filter((n) => !prev.includes(n));
-          return newNames.length > 0 ? [...prev, ...newNames] : prev;
-        });
-      }
       setMentions([]);
     } catch (err: any) {
       const errMsg = err?.response?.data?.message || "Failed to get response. Check your API key and try again.";
@@ -499,7 +490,7 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
                     : "bg-secondary text-secondary-foreground"
                 )}
               >
-                {renderWithMentions(msg.content, msg.role === "user", usedMentionNames.length > 0 ? usedMentionNames : undefined)}
+                {renderWithMentions(msg.content, msg.role === "user", allEntityNames)}
               </div>
             </div>
           ))}
@@ -560,39 +551,38 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
             </div>
           )}
 
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (showSuggestions && suggestions.length > 0) {
-                selectSuggestion(suggestions[selectedSuggestion]);
-              } else {
-                handleSend();
-              }
-            }}
-            className="flex gap-2 p-3 pb-2"
-          >
+          <div className="flex gap-2 p-3 pb-2 items-end">
             <div className="relative flex-1 min-w-0">
-              <Input
+              <textarea
                 ref={inputRef}
                 placeholder="Ask about logs... type @ to mention"
                 value={input}
-                onChange={(e) => handleInputChange(e.target.value)}
+                onChange={(e) => {
+                  handleInputChange(e.target.value);
+                  e.target.style.height = "auto";
+                  e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
+                }}
                 onKeyDown={handleKeyDown}
-                className={cn("h-8 text-sm", mentions.length > 0 && "text-transparent caret-foreground selection:bg-primary/20")}
+                rows={1}
+                className={cn(
+                  "w-full resize-none rounded-lg border border-input bg-transparent px-2.5 py-1.5 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30",
+                  mentions.length > 0 && "text-transparent caret-foreground selection:bg-primary/20"
+                )}
+                style={{ height: "32px", maxHeight: "120px" }}
               />
               {mentions.length > 0 && input && (
                 <div
-                  className="absolute inset-0 flex items-center px-2.5 text-sm pointer-events-none overflow-hidden whitespace-nowrap"
+                  className="absolute inset-0 pointer-events-none px-2.5 py-1.5 text-sm whitespace-pre-wrap wrap-break-word overflow-hidden rounded-lg border border-transparent"
                   aria-hidden="true"
                 >
-                  {renderInputHighlight(input, mentions)}
+                  {renderInputWithMentions(input, mentions)}
                 </div>
               )}
             </div>
-            <Button type="submit" size="icon" className="size-8 shrink-0" disabled={isThinking}>
+            <Button type="button" size="icon" className="size-8 shrink-0" disabled={isThinking} onClick={handleSend}>
               <Send className="size-3.5" />
             </Button>
-          </form>
+          </div>
         </div>
         <div className="px-3 pb-2">
           <p className="text-[11px] text-muted-foreground truncate">{contextLine}</p>
