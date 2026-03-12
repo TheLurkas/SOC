@@ -28,9 +28,8 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-soc-platform-secret-key-change-in-production-2026}
       BETTER_AUTH_URL: http://api:3001
       PORT: "3001"
-      CHUTES_API_KEY: ${CHUTES_API_KEY:-}
-      CHUTES_BASE_URL: ${CHUTES_BASE_URL:-https://llm.chutes.ai/v1}
-      CHUTES_MODEL: ${CHUTES_MODEL:-Qwen/Qwen2.5-72B-Instruct}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.1}
     depends_on:
       db:
         condition: service_healthy

@@ -50,17 +50,30 @@ export function Navbar({ onChatToggle, chatOpen }: NavbarProps) {
             );
           })}
           {isAdmin && (
-            <Link
-              href="/users"
-              className={cn(
-                "px-3 py-1 text-sm rounded-md transition-colors",
-                pathname.startsWith("/users")
-                  ? "text-foreground bg-secondary"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              Users
-            </Link>
+            <>
+              <Link
+                href="/rules"
+                className={cn(
+                  "px-3 py-1 text-sm rounded-md transition-colors",
+                  pathname.startsWith("/rules")
+                    ? "text-foreground bg-secondary"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Rules
+              </Link>
+              <Link
+                href="/users"
+                className={cn(
+                  "px-3 py-1 text-sm rounded-md transition-colors",
+                  pathname.startsWith("/users")
+                    ? "text-foreground bg-secondary"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Users
+              </Link>
+            </>
           )}
         </nav>
 

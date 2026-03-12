@@ -21,38 +21,14 @@ import { cn } from "@/lib/utils";
 import { CreateCompanyDialog } from "@/components/create-company-dialog";
 import api from "@/lib/api";
 import { useGlobalSocket } from "@/lib/socket";
-import type { CompanyDto, AlertStatsDto } from "@soc/shared";
-
-const alertsData = [
-  { day: "Mon", critical: 3, warning: 8, info: 12 },
-  { day: "Tue", critical: 1, warning: 5, info: 15 },
-  { day: "Wed", critical: 5, warning: 11, info: 9 },
-  { day: "Thu", critical: 2, warning: 7, info: 14 },
-  { day: "Fri", critical: 7, warning: 9, info: 11 },
-  { day: "Sat", critical: 4, warning: 6, info: 8 },
-  { day: "Sun", critical: 2, warning: 4, info: 10 },
-];
+import type { CompanyDto, AlertStatsDto, DashboardStatsDto } from "@soc/shared";
 
 const alertsConfig: ChartConfig = {
   critical: { label: "Critical", color: "oklch(0.65 0.20 25)" },
-  warning: { label: "Warning", color: "oklch(0.75 0.15 70)" },
-  info: { label: "Info", color: "oklch(0.60 0.10 250)" },
+  high: { label: "High", color: "oklch(0.70 0.17 45)" },
+  medium: { label: "Medium", color: "oklch(0.75 0.15 70)" },
+  low: { label: "Low", color: "oklch(0.60 0.10 250)" },
 };
-
-const logVolumeData = [
-  { hour: "00:00", logs: 320 },
-  { hour: "02:00", logs: 180 },
-  { hour: "04:00", logs: 140 },
-  { hour: "06:00", logs: 280 },
-  { hour: "08:00", logs: 890 },
-  { hour: "10:00", logs: 1240 },
-  { hour: "12:00", logs: 1100 },
-  { hour: "14:00", logs: 1380 },
-  { hour: "16:00", logs: 1520 },
-  { hour: "18:00", logs: 980 },
-  { hour: "20:00", logs: 640 },
-  { hour: "22:00", logs: 420 },
-];
 
 const logVolumeConfig: ChartConfig = {
   logs: { label: "Logs", color: "oklch(0.72 0.10 195)" },
@@ -63,8 +39,8 @@ export default function Dashboard() {
   const [companies, setCompanies] = useState<CompanyDto[]>([]);
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
-  const [totalLogs, setTotalLogs] = useState(0);
   const [alertStats, setAlertStats] = useState<AlertStatsDto | null>(null);
+  const [dashStats, setDashStats] = useState<DashboardStatsDto | null>(null);
 
   const fetchCompanies = useCallback(async () => {
     try {
@@ -77,25 +53,28 @@ export default function Dashboard() {
     }
   }, []);
 
+  const fetchDashStats = useCallback(() => {
+    api.get("/dashboard/stats").then(({ data: json }) => setDashStats(json.data)).catch(() => {});
+  }, []);
+
+  const fetchAlertStats = useCallback(() => {
+    api.get("/alerts/stats").then(({ data: json }) => setAlertStats(json.data)).catch(() => {});
+  }, []);
+
   useEffect(() => {
     fetchCompanies();
+    fetchDashStats();
+    fetchAlertStats();
     api.get("/favorites")
       .then(({ data: json }) => setFavorites(new Set(json.data)))
       .catch(() => {});
-    api.get("/alerts/stats")
-      .then(({ data: json }) => setAlertStats(json.data))
-      .catch(() => {});
-  }, [fetchCompanies]);
+  }, [fetchCompanies, fetchDashStats, fetchAlertStats]);
 
   useGlobalSocket({
-    onLogsIngested: (p) => setTotalLogs((prev) => prev + p.count),
-    onLogsCleared: () => setTotalLogs(0),
-    onAlertCreated: () => {
-      api.get("/alerts/stats").then(({ data: json }) => setAlertStats(json.data)).catch(() => {});
-    },
-    onAlertUpdated: () => {
-      api.get("/alerts/stats").then(({ data: json }) => setAlertStats(json.data)).catch(() => {});
-    },
+    onLogsIngested: () => fetchDashStats(),
+    onLogsCleared: () => fetchDashStats(),
+    onAlertCreated: () => { fetchAlertStats(); fetchDashStats(); },
+    onAlertUpdated: () => { fetchAlertStats(); },
   });
 
   const toggleFavorite = useCallback((id: string) => {
@@ -131,7 +110,7 @@ export default function Dashboard() {
     { label: "Companies", value: String(companies.length) },
     { label: "Workspaces", value: String(totalWorkspaces) },
     { label: "Open Alerts", value: String(alertStats ? alertStats.open + alertStats.acknowledged + alertStats.investigating : 0) },
-    { label: "Logs (live)", value: totalLogs.toLocaleString() },
+    { label: "Total Logs", value: (dashStats?.totalLogs ?? 0).toLocaleString() },
   ];
 
   return (
@@ -155,15 +134,20 @@ export default function Dashboard() {
             <CardTitle className="text-sm font-medium">Alerts (7 days)</CardTitle>
           </CardHeader>
           <CardContent className="p-4 pt-0">
-            <ChartContainer config={alertsConfig} className="h-[160px] w-full">
-              <BarChart data={alertsData}>
-                <XAxis dataKey="day" tickLine={false} axisLine={false} fontSize={11} tickMargin={4} />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                <Bar dataKey="critical" stackId="a" fill="var(--color-critical)" radius={[0, 0, 0, 0]} />
-                <Bar dataKey="warning" stackId="a" fill="var(--color-warning)" radius={[0, 0, 0, 0]} />
-                <Bar dataKey="info" stackId="a" fill="var(--color-info)" radius={[2, 2, 0, 0]} />
-              </BarChart>
-            </ChartContainer>
+            {dashStats?.alertsByDay && dashStats.alertsByDay.some((d) => d.critical + d.high + d.medium + d.low > 0) ? (
+              <ChartContainer config={alertsConfig} className="h-[160px] w-full">
+                <BarChart data={dashStats.alertsByDay}>
+                  <XAxis dataKey="day" tickLine={false} axisLine={false} fontSize={11} tickMargin={4} />
+                  <ChartTooltip content={<ChartTooltipContent />} />
+                  <Bar dataKey="critical" stackId="a" fill="var(--color-critical)" radius={[0, 0, 0, 0]} />
+                  <Bar dataKey="high" stackId="a" fill="var(--color-high)" radius={[0, 0, 0, 0]} />
+                  <Bar dataKey="medium" stackId="a" fill="var(--color-medium)" radius={[0, 0, 0, 0]} />
+                  <Bar dataKey="low" stackId="a" fill="var(--color-low)" radius={[2, 2, 0, 0]} />
+                </BarChart>
+              </ChartContainer>
+            ) : (
+              <p className="text-xs text-muted-foreground py-12 text-center">No alerts in the last 7 days</p>
+            )}
           </CardContent>
         </Card>
         <Card>
@@ -171,19 +155,23 @@ export default function Dashboard() {
             <CardTitle className="text-sm font-medium">Log Volume (24h)</CardTitle>
           </CardHeader>
           <CardContent className="p-4 pt-0">
-            <ChartContainer config={logVolumeConfig} className="h-[160px] w-full">
-              <AreaChart data={logVolumeData}>
-                <XAxis dataKey="hour" tickLine={false} axisLine={false} fontSize={11} tickMargin={4} />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                <defs>
-                  <linearGradient id="logsFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="var(--color-logs)" stopOpacity={0.3} />
-                    <stop offset="100%" stopColor="var(--color-logs)" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <Area dataKey="logs" type="monotone" stroke="var(--color-logs)" fill="url(#logsFill)" strokeWidth={1.5} />
-              </AreaChart>
-            </ChartContainer>
+            {dashStats?.logVolume && dashStats.logVolume.some((d) => d.logs > 0) ? (
+              <ChartContainer config={logVolumeConfig} className="h-[160px] w-full">
+                <AreaChart data={dashStats.logVolume}>
+                  <XAxis dataKey="hour" tickLine={false} axisLine={false} fontSize={11} tickMargin={4} />
+                  <ChartTooltip content={<ChartTooltipContent />} />
+                  <defs>
+                    <linearGradient id="logsFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="var(--color-logs)" stopOpacity={0.3} />
+                      <stop offset="100%" stopColor="var(--color-logs)" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <Area dataKey="logs" type="monotone" stroke="var(--color-logs)" fill="url(#logsFill)" strokeWidth={1.5} />
+                </AreaChart>
+              </ChartContainer>
+            ) : (
+              <p className="text-xs text-muted-foreground py-12 text-center">No logs in the last 24 hours</p>
+            )}
           </CardContent>
         </Card>
       </div>

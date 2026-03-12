@@ -91,6 +91,25 @@
   animation: row-highlight 1.5s ease-out;
 }
 
+/* thin dark scrollbar for scrollable panels */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(0.30 0.005 250) transparent;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  width: 4px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: oklch(0.30 0.005 250);
+  border-radius: 2px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.40 0.005 250);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

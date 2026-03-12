@@ -2,9 +2,12 @@ import { Injectable, Logger, HttpException, HttpStatus } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import type { ChatRequestDto, ChatResponseDto, MessageDto, ConversationDto, ConversationDetailDto, MentionSuggestionDto, ChatMention } from '@soc/shared';
 
-const CHUTES_BASE_URL = process.env.CHUTES_BASE_URL || 'https://llm.chutes.ai/v1';
-const CHUTES_MODEL = process.env.CHUTES_MODEL || 'Qwen/Qwen2.5-72B-Instruct';
-const CHUTES_API_KEY = process.env.CHUTES_API_KEY || '';
+// read at call time so dotenv is guaranteed to have loaded
+const getOpenAiConfig = () => ({
+  baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+  model: process.env.OPENAI_MODEL || 'gpt-5.1',
+  apiKey: process.env.OPENAI_API_KEY || '',
+});
 
 const LOG_SCHEMA = `
 Table: logs
@@ -294,8 +297,8 @@ Given a user's question about security logs, generate a Prisma "where" clause (a
 ${LOG_SCHEMA}
 
 RULES:
-- Return ONLY valid JSON. No markdown, no explanation, no code fences.
-- The JSON must have this shape: { "where": {}, "orderBy": {}, "take": number }
+- Return ONLY valid JSON. No markdown, no explanation, no code fences, no text before or after.
+- The JSON must have this exact shape: { "where": {}, "orderBy": {}, "take": number }
 - "where" is a Prisma where clause for the Log model.
 - "orderBy" defaults to { "timestamp": "desc" } if not specified.
 - "take" is optional. Omit it to retrieve ALL matching logs. Only set it if the user explicitly asks for a specific number (e.g. "show me the last 50").
@@ -307,7 +310,21 @@ RULES:
 - Use Prisma operators: equals, not, in, notIn, lt, lte, gt, gte, contains (for string search), mode: "insensitive" for case-insensitive.
 - For "latest" or "recent" queries without a specific count, just use orderBy desc without a take limit.
 - For severity filtering, valid values are: unknown, low, medium, high, critical (lowercase).
-- For string matching on fields like eventType, vendor, action, application — use contains with mode: "insensitive" so casing doesn't matter.`;
+- For string matching on fields like eventType, vendor, action, application — use contains with mode: "insensitive" so casing doesn't matter.
+
+EXAMPLES:
+
+User: "show me denied traffic" (workspace scoped to "ws123")
+{"where":{"workspaceId":"ws123","action":"deny"},"orderBy":{"timestamp":"desc"}}
+
+User: "any critical alerts in @Acme Corp?" (company mention with id "comp1")
+{"where":{"severity":"critical","workspace":{"companyId":{"in":["comp1"]}}},"orderBy":{"timestamp":"desc"}}
+
+User: "show logs from last hour"  (workspace "ws456", current time ~1741800000)
+{"where":{"workspaceId":"ws456","timestamp":{"gte":1741796400}},"orderBy":{"timestamp":"desc"}}
+
+User: "what happened today" (no scope)
+{"where":{"timestamp":{"gte":${Math.floor(new Date().setHours(0, 0, 0, 0) / 1000)}}}, "orderBy":{"timestamp":"desc"}}`;
 
     const messages: LlmMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -324,7 +341,11 @@ RULES:
     const raw = await this.callLlm(messages);
 
     try {
-      const cleaned = raw.replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
+      // strip markdown fences, leading/trailing text around the JSON
+      let cleaned = raw.replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
+      // extract the first JSON object if there's extra text
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (jsonMatch) cleaned = jsonMatch[0];
       return JSON.parse(cleaned);
     } catch {
       this.logger.warn(`LLM returned unparseable query, falling back to default. Raw: ${raw}`);
@@ -368,8 +389,21 @@ RULES:
     } catch (err) {
       this.logger.error(`Prisma query failed: ${err}. Query: ${JSON.stringify(queryJson)}`);
       const fallbackWhere: any = {};
-      if (workspaceId) fallbackWhere.workspaceId = workspaceId;
-      else if (companyId) fallbackWhere.workspace = { companyId };
+
+      // apply mention scoping even in fallback
+      if (mentions?.length) {
+        const wsIds = mentions.filter((m) => m.type === 'workspace').map((m) => m.id);
+        const coIds = mentions.filter((m) => m.type === 'company').map((m) => m.id);
+        const conditions: any[] = [];
+        if (wsIds.length) conditions.push({ workspaceId: { in: wsIds } });
+        if (coIds.length) conditions.push({ workspace: { companyId: { in: coIds } } });
+        if (conditions.length === 1) Object.assign(fallbackWhere, conditions[0]);
+        else if (conditions.length > 1) fallbackWhere.OR = conditions;
+      } else if (workspaceId) {
+        fallbackWhere.workspaceId = workspaceId;
+      } else if (companyId) {
+        fallbackWhere.workspace = { companyId };
+      }
 
       return this.prisma.log.findMany({
         where: fallbackWhere,
@@ -450,6 +484,18 @@ RULES:
   private async generateAnswer(message: string, logs: any[], history?: MessageDto[]): Promise<string> {
     const logContext = this.buildLogContext(logs);
 
+    // fetch admin-defined analysis rules
+    const analysisRules = await this.prisma.analysisRule.findMany({
+      where: { enabled: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    let rulesSection = '';
+    if (analysisRules.length > 0) {
+      const ruleLines = analysisRules.map((r: any) => `- [${r.category}] ${r.content}`).join('\n');
+      rulesSection = `\n\nANALYSIS GUIDELINES (defined by the SOC team — use these as additional context when evaluating logs, but apply your own judgment too):\n${ruleLines}`;
+    }
+
     const systemPrompt = `You are Lurka, a SOC (Security Operations Center) AI analyst assistant.
 You help security analysts investigate logs, identify threats, and understand network activity.
 
@@ -464,7 +510,7 @@ RULES:
 - Use plain text. No markdown headers. Keep paragraphs short.
 - When mentioning counts, be precise based on the data provided.
 - You have aggregated stats and a sample of the ${logs.length} logs retrieved. Use both to answer.
-${logs.length === 0 ? '- No logs matched the query. Let the user know and suggest refining their question.' : ''}`;
+${logs.length === 0 ? '- No logs matched the query. Let the user know and suggest refining their question.' : ''}${rulesSection}`;
 
     const messages: LlmMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -488,14 +534,15 @@ ${logs.length === 0 ? '- No logs matched the query. Let the user know and sugges
   // ── LLM caller ────────────────────────────────────────────
 
   private async callLlm(messages: LlmMessage[]): Promise<string> {
-    const res = await fetch(`${CHUTES_BASE_URL}/chat/completions`, {
+    const { baseUrl, model, apiKey } = getOpenAiConfig();
+    const res = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${CHUTES_API_KEY}`,
+        'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: CHUTES_MODEL,
+        model,
         messages,
         temperature: 0.2,
       }),

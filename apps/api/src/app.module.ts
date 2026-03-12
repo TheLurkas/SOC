@@ -11,9 +11,11 @@ import { EventsModule } from './events/events.module';
 import { ChatModule } from './chat/chat.module';
 import { AlertsModule } from './alerts/alerts.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { RulesModule } from './rules/rules.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 
 @Module({
-  imports: [PrismaModule, EventsModule, UsersModule, FavoritesModule, CompaniesModule, WorkspacesModule, LogsModule, ChatModule, AlertsModule, NotificationsModule],
+  imports: [PrismaModule, EventsModule, UsersModule, FavoritesModule, CompaniesModule, WorkspacesModule, LogsModule, ChatModule, AlertsModule, NotificationsModule, RulesModule, DashboardModule],
   controllers: [AppController],
   providers: [AppService],
 })

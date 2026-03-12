@@ -221,6 +221,43 @@ export interface AlertActivityDto {
   };
 }
 
+// ── Dashboard DTOs ──────────────────────────────────────────
+
+export interface DashboardStatsDto {
+  totalLogs: number;
+  logVolume: { hour: string; logs: number }[];
+  alertsByDay: { day: string; critical: number; high: number; medium: number; low: number }[];
+}
+
+// ── Analysis Rule DTOs ──────────────────────────────────────
+
+export const RULE_CATEGORIES = ['general', 'threat', 'compliance', 'network', 'custom'] as const;
+export type RuleCategory = (typeof RULE_CATEGORIES)[number];
+
+export interface AnalysisRuleDto {
+  id: string;
+  title: string;
+  content: string;
+  category: string;
+  enabled: boolean;
+  createdBy: { id: string; name: string };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateAnalysisRuleDto {
+  title: string;
+  content: string;
+  category?: string;
+}
+
+export interface UpdateAnalysisRuleDto {
+  title?: string;
+  content?: string;
+  category?: string;
+  enabled?: boolean;
+}
+
 // ── Notification DTOs ───────────────────────────────────────
 
 export interface NotificationDto {

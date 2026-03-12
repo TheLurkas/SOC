@@ -324,7 +324,7 @@ export default function LogsPage({
             <CardTitle className="text-sm font-medium">Top Source IPs</CardTitle>
           </CardHeader>
           <CardContent className="p-4 pt-0">
-            <div className="space-y-1.5 max-h-[160px] overflow-y-auto">
+            <div className="space-y-1.5 max-h-[160px] overflow-y-auto pr-2 scrollbar-thin">
               {(stats?.topSourceIps ?? []).map(({ ip, count }) => (
                 <div key={ip} className="flex items-center justify-between text-xs">
                   <span className="font-mono text-muted-foreground">{ip}</span>
@@ -344,7 +344,7 @@ export default function LogsPage({
             <CardTitle className="text-sm font-medium">Top Destination IPs</CardTitle>
           </CardHeader>
           <CardContent className="p-4 pt-0">
-            <div className="space-y-1.5 max-h-[160px] overflow-y-auto">
+            <div className="space-y-1.5 max-h-[160px] overflow-y-auto pr-2 scrollbar-thin">
               {(stats?.topDestIps ?? []).map(({ ip, count }) => (
                 <div key={ip} className="flex items-center justify-between text-xs">
                   <span className="font-mono text-muted-foreground">{ip}</span>

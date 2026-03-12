@@ -27,6 +27,7 @@ model user {
   alertActivities AlertActivity[]
   alertNotes      AlertNote[]
   notifications   Notification[]
+  analysisRules   AnalysisRule[]
 }
 
 model session {
@@ -211,6 +212,22 @@ model Notification {
 
   @@index([userId, read, createdAt])
   @@map("notifications")
+}
+
+model AnalysisRule {
+  id          String   @id @default(cuid())
+  title       String
+  content     String   // natural language rule
+  category    String   @default("general") // general, threat, compliance, network, custom
+  enabled     Boolean  @default(true)
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdBy user @relation(fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([enabled])
+  @@map("analysis_rules")
 }
 
 model Conversation {
