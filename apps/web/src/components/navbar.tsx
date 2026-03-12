@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { MessageSquare, LogOut } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
+import { NotificationBell } from "@/components/notifications";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard" },
@@ -64,6 +65,7 @@ export function Navbar({ onChatToggle, chatOpen }: NavbarProps) {
         </nav>
 
         <div className="ml-auto flex items-center gap-1">
+          <NotificationBell />
           <button
             onClick={onChatToggle}
             className={cn(

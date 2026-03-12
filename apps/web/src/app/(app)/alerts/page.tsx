@@ -20,6 +20,7 @@ import {
 import { Shield, ChevronLeft, ChevronRight, UserCheck, Clock, Activity, Send, Pencil, Trash2, Check, X } from "lucide-react";
 import { toast } from "sonner";
 import api from "@/lib/api";
+import { useGlobalSocket } from "@/lib/socket";
 import { authClient } from "@/lib/auth-client";
 import type { AlertDto, AlertStatsDto, AlertActivityDto, AlertNoteDto, UserDto, PaginationMeta } from "@soc/shared";
 
@@ -184,6 +185,19 @@ export default function AlertsPage() {
       fetchNotes(selectedAlert.id);
     }
   }, [selectedAlert?.id]);
+
+  // real-time alert updates
+  useGlobalSocket({
+    onAlertCreated: () => {
+      fetchAlerts();
+      fetchStats();
+      toast.info("New alert received");
+    },
+    onAlertUpdated: () => {
+      fetchAlerts();
+      fetchStats();
+    },
+  });
 
   const updateAlert = async (id: string, data: { status?: string; assigneeId?: string | null }) => {
     try {

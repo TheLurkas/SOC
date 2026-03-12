@@ -13,6 +13,7 @@ import {
   type WsLogDeletedPayload,
   type WsLogsClearedPayload,
   type WsAlertPayload,
+  type WsNotificationPayload,
 } from '@soc/shared';
 
 @WebSocketGateway({
@@ -38,6 +39,11 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage(WS_EVENTS.LEAVE_WORKSPACE)
   handleLeaveWorkspace(client: Socket, workspaceId: string) {
     client.leave(`workspace:${workspaceId}`);
+  }
+
+  @SubscribeMessage(WS_EVENTS.JOIN_USER)
+  handleJoinUser(client: Socket, userId: string) {
+    client.join(`user:${userId}`);
   }
 
   emitLogsIngested(payload: WsLogsIngestedPayload) {
@@ -66,5 +72,9 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   emitAlertUpdated(payload: WsAlertPayload) {
     this.server.to(`workspace:${payload.workspaceId}`).emit(WS_EVENTS.ALERT_UPDATED, payload);
     this.server.emit(WS_EVENTS.ALERT_UPDATED, payload);
+  }
+
+  emitNotification(payload: WsNotificationPayload) {
+    this.server.to(`user:${payload.userId}`).emit(WS_EVENTS.NOTIFICATION_NEW, payload.notification);
   }
 }

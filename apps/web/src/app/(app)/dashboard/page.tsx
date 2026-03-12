@@ -90,6 +90,12 @@ export default function Dashboard() {
   useGlobalSocket({
     onLogsIngested: (p) => setTotalLogs((prev) => prev + p.count),
     onLogsCleared: () => setTotalLogs(0),
+    onAlertCreated: () => {
+      api.get("/alerts/stats").then(({ data: json }) => setAlertStats(json.data)).catch(() => {});
+    },
+    onAlertUpdated: () => {
+      api.get("/alerts/stats").then(({ data: json }) => setAlertStats(json.data)).catch(() => {});
+    },
   });
 
   const toggleFavorite = useCallback((id: string) => {

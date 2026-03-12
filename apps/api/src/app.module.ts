@@ -10,9 +10,10 @@ import { LogsModule } from './logs/logs.module';
 import { EventsModule } from './events/events.module';
 import { ChatModule } from './chat/chat.module';
 import { AlertsModule } from './alerts/alerts.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
-  imports: [PrismaModule, EventsModule, UsersModule, FavoritesModule, CompaniesModule, WorkspacesModule, LogsModule, ChatModule, AlertsModule],
+  imports: [PrismaModule, EventsModule, UsersModule, FavoritesModule, CompaniesModule, WorkspacesModule, LogsModule, ChatModule, AlertsModule, NotificationsModule],
   controllers: [AppController],
   providers: [AppService],
 })

@@ -26,6 +26,7 @@ model user {
   assignedAlerts  Alert[]
   alertActivities AlertActivity[]
   alertNotes      AlertNote[]
+  notifications   Notification[]
 }
 
 model session {
@@ -153,10 +154,11 @@ model Alert {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  workspace  Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  assignee   user?           @relation(fields: [assigneeId], references: [id], onDelete: SetNull)
-  activities AlertActivity[]
-  notes      AlertNote[]
+  workspace     Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  assignee      user?           @relation(fields: [assigneeId], references: [id], onDelete: SetNull)
+  activities    AlertActivity[]
+  notes         AlertNote[]
+  notifications Notification[]
 
   @@index([workspaceId, status])
   @@index([assigneeId])
@@ -192,6 +194,23 @@ model AlertNote {
 
   @@index([alertId, createdAt])
   @@map("alert_notes")
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String   // assigned, unassigned, status_changed, note_added
+  title     String
+  body      String?
+  alertId   String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user  user   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  alert Alert? @relation(fields: [alertId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read, createdAt])
+  @@map("notifications")
 }
 
 model Conversation {

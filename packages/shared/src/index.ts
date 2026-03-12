@@ -221,6 +221,18 @@ export interface AlertActivityDto {
   };
 }
 
+// ── Notification DTOs ───────────────────────────────────────
+
+export interface NotificationDto {
+  id: string;
+  type: string;
+  title: string;
+  body: string | null;
+  alertId: string | null;
+  read: boolean;
+  createdAt: string;
+}
+
 // ── WebSocket Events ────────────────────────────────────────
 
 export const WS_EVENTS = {
@@ -232,6 +244,8 @@ export const WS_EVENTS = {
   LEAVE_WORKSPACE: 'workspace:leave',
   ALERT_CREATED: 'alert:created',
   ALERT_UPDATED: 'alert:updated',
+  JOIN_USER: 'user:join',
+  NOTIFICATION_NEW: 'notification:new',
 } as const;
 
 export interface WsAlertPayload {
@@ -257,6 +271,11 @@ export interface WsLogDeletedPayload {
 export interface WsLogsClearedPayload {
   workspaceId: string;
   deleted: number;
+}
+
+export interface WsNotificationPayload {
+  userId: string;
+  notification: NotificationDto;
 }
 
 // ── Chat DTOs ────────────────────────────────────────────────

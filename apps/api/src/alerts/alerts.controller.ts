@@ -43,6 +43,25 @@ export class AlertsController {
     private readonly events: EventsGateway,
   ) {}
 
+  // create a notification and push it via websocket
+  private async notify(userId: string, type: string, title: string, body: string, alertId?: string) {
+    const notification = await this.prisma.notification.create({
+      data: { userId, type, title, body, alertId },
+    });
+    this.events.emitNotification({
+      userId,
+      notification: {
+        id: notification.id,
+        type: notification.type,
+        title: notification.title,
+        body: notification.body,
+        alertId: notification.alertId,
+        read: notification.read,
+        createdAt: notification.createdAt.toISOString(),
+      },
+    });
+  }
+
   @Get()
   async list(
     @Query('status') status?: string,
@@ -253,6 +272,37 @@ export class AlertsController {
 
     this.events.emitAlertUpdated({ alertId: id, workspaceId: existing.workspaceId });
 
+    // send notifications
+    for (const a of activities) {
+      if (a.action === 'assigned' && body.assigneeId && body.assigneeId !== currentUser.id) {
+        await this.notify(
+          body.assigneeId,
+          'assigned',
+          `Alert assigned to you`,
+          `"${existing.title}" was assigned to you by ${currentUser.name}`,
+          id,
+        );
+      }
+      if (a.action === 'unassigned' && existing.assigneeId && existing.assigneeId !== currentUser.id) {
+        await this.notify(
+          existing.assigneeId,
+          'unassigned',
+          `Alert unassigned`,
+          `"${existing.title}" was unassigned from you by ${currentUser.name}`,
+          id,
+        );
+      }
+      if (a.action === 'status_changed' && existing.assigneeId && existing.assigneeId !== currentUser.id) {
+        await this.notify(
+          existing.assigneeId,
+          'status_changed',
+          `Alert status changed`,
+          `"${existing.title}": ${a.detail}`,
+          id,
+        );
+      }
+    }
+
     return { data: alert };
   }
 
@@ -305,6 +355,17 @@ export class AlertsController {
         detail: body.content.trim().slice(0, 100),
       },
     });
+
+    // notify the assignee if someone else left a note on their alert
+    if (alert.assigneeId && alert.assigneeId !== currentUser.id) {
+      await this.notify(
+        alert.assigneeId,
+        'note_added',
+        `New note on your alert`,
+        `${currentUser.name} commented on "${alert.title}": ${body.content.trim().slice(0, 80)}`,
+        id,
+      );
+    }
 
     return { data: note };
   }

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { io, Socket } from "socket.io-client";
-import { WS_EVENTS } from "@soc/shared";
+import { WS_EVENTS, type NotificationDto } from "@soc/shared";
 
 const SOCKET_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
@@ -21,6 +21,8 @@ export interface SocketHandlers {
   onLogUpdated?: (payload: { workspaceId: string; logId: string }) => void;
   onLogDeleted?: (payload: { workspaceId: string; logId: string }) => void;
   onLogsCleared?: (payload: { workspaceId: string; deleted: number }) => void;
+  onAlertCreated?: (payload: { alertId: string; workspaceId: string }) => void;
+  onAlertUpdated?: (payload: { alertId: string; workspaceId: string }) => void;
 }
 
 // joins a workspace room and listens for scoped events
@@ -59,7 +61,7 @@ export function useWorkspaceSocket(
 
 // listens for broadcast events (not room-scoped), for dashboard/company pages
 export function useGlobalSocket(
-  handlers: Pick<SocketHandlers, "onLogsIngested" | "onLogsCleared">,
+  handlers: Pick<SocketHandlers, "onLogsIngested" | "onLogsCleared" | "onAlertCreated" | "onAlertUpdated">,
 ) {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
@@ -69,13 +71,42 @@ export function useGlobalSocket(
 
     const onIngested = (p: any) => handlersRef.current.onLogsIngested?.(p);
     const onCleared = (p: any) => handlersRef.current.onLogsCleared?.(p);
+    const onAlertCreated = (p: any) => handlersRef.current.onAlertCreated?.(p);
+    const onAlertUpdated = (p: any) => handlersRef.current.onAlertUpdated?.(p);
 
     s.on(WS_EVENTS.LOGS_INGESTED, onIngested);
     s.on(WS_EVENTS.LOGS_CLEARED, onCleared);
+    s.on(WS_EVENTS.ALERT_CREATED, onAlertCreated);
+    s.on(WS_EVENTS.ALERT_UPDATED, onAlertUpdated);
 
     return () => {
       s.off(WS_EVENTS.LOGS_INGESTED, onIngested);
       s.off(WS_EVENTS.LOGS_CLEARED, onCleared);
+      s.off(WS_EVENTS.ALERT_CREATED, onAlertCreated);
+      s.off(WS_EVENTS.ALERT_UPDATED, onAlertUpdated);
     };
   }, []);
+}
+
+// joins the user's personal room for notifications
+export function useNotificationSocket(
+  userId: string | undefined,
+  onNotification: (notification: NotificationDto) => void,
+) {
+  const handlerRef = useRef(onNotification);
+  handlerRef.current = onNotification;
+
+  useEffect(() => {
+    if (!userId) return;
+
+    const s = getSocket();
+    s.emit(WS_EVENTS.JOIN_USER, userId);
+
+    const handler = (p: any) => handlerRef.current(p);
+    s.on(WS_EVENTS.NOTIFICATION_NEW, handler);
+
+    return () => {
+      s.off(WS_EVENTS.NOTIFICATION_NEW, handler);
+    };
+  }, [userId]);
 }
