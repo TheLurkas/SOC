@@ -13,7 +13,7 @@ export class DashboardController {
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const twentyFourHoursAgo = Math.floor((now.getTime() - 24 * 60 * 60 * 1000) / 1000);
 
-    const [totalLogs, logRows, alertRows, alertsByCompanyRaw] = await Promise.all([
+    const [totalLogs, logRows, alertRows, alertsByCompanyRaw, srcCountryRows, dstCountryRows] = await Promise.all([
       this.prisma.log.count(),
 
       // logs from last 24h for volume chart
@@ -32,6 +32,20 @@ export class DashboardController {
       // alerts per company
       this.prisma.alert.groupBy({
         by: ['workspaceId'],
+        _count: { _all: true },
+      }),
+
+      // source countries
+      this.prisma.log.groupBy({
+        by: ['srcCountry'],
+        where: { srcCountry: { not: null } },
+        _count: { _all: true },
+      }),
+
+      // destination countries
+      this.prisma.log.groupBy({
+        by: ['dstCountry'],
+        where: { dstCountry: { not: null } },
         _count: { _all: true },
       }),
     ]);
@@ -122,12 +136,27 @@ export class DashboardController {
       .sort((a, b) => b.count - a.count)
       .map((c) => ({ name: c.name, alerts: c.count }));
 
+    // merge src + dst country counts into a single heatmap
+    const countryMap = new Map<string, number>();
+    for (const row of srcCountryRows) {
+      const c = row.srcCountry!;
+      countryMap.set(c, (countryMap.get(c) || 0) + row._count._all);
+    }
+    for (const row of dstCountryRows) {
+      const c = row.dstCountry!;
+      countryMap.set(c, (countryMap.get(c) || 0) + row._count._all);
+    }
+    const countryHeatmap = [...countryMap.entries()]
+      .map(([country, count]) => ({ country, count }))
+      .sort((a, b) => b.count - a.count);
+
     return {
       data: {
         totalLogs,
         logVolume,
         alertsByDay,
         alertsByCompany,
+        countryHeatmap,
       },
     };
   }

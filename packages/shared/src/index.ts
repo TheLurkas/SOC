@@ -232,6 +232,7 @@ export interface DashboardStatsDto {
   logVolume: { hour: string; logs: number }[];
   alertsByDay: { day: string; critical: number; high: number; medium: number; low: number }[];
   alertsByCompany: { name: string; alerts: number }[];
+  countryHeatmap: { country: string; count: number }[];
 }
 
 // ── Analysis Rule DTOs ──────────────────────────────────────

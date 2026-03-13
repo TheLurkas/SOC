@@ -77,29 +77,29 @@ COLORS = {
 
 stats = defaultdict(int)
 
-# map FortiGate level names to our severity enum
-LEVEL_TO_SEVERITY = {
-    "emergency": "critical",
-    "alert": "critical",
-    "critical": "critical",
-    "error": "high",
-    "warning": "medium",
-    "notice": "low",
-    "information": "low",
-    "debug": "unknown",
-}
+# # map FortiGate level names to our severity enum
+# LEVEL_TO_SEVERITY = {
+#     "emergency": "critical",
+#     "alert": "critical",
+#     "critical": "critical",
+#     "error": "high",
+#     "warning": "medium",
+#     "notice": "low",
+#     "information": "low",
+#     "debug": "unknown",
+# }
 
-# IANA protocol numbers
-PROTO_MAP = {
-    "1": "icmp",
-    "6": "tcp",
-    "17": "udp",
-    "47": "gre",
-    "50": "esp",
-    "51": "ah",
-    "58": "icmpv6",
-    "89": "ospf",
-}
+# # IANA protocol numbers
+# PROTO_MAP = {
+#     "1": "icmp",
+#     "6": "tcp",
+#     "17": "udp",
+#     "47": "gre",
+#     "50": "esp",
+#     "51": "ah",
+#     "58": "icmpv6",
+#     "89": "ospf",
+# }
 
 
 def parse_fortigate_log(raw_message: str) -> dict:
@@ -113,43 +113,43 @@ def parse_fortigate_log(raw_message: str) -> dict:
     return fields
 
 
-def fortigate_to_ingest(fields: dict, workspace_id: str, raw_message: str) -> dict:
-    """Convert parsed FortiGate fields to the /logs/ingest payload format (regex fallback)."""
-    eventtime = fields.get("eventtime", "")
-    if eventtime and len(eventtime) > 10:
-        timestamp = int(eventtime[:10])
-    elif eventtime:
-        timestamp = int(eventtime)
-    else:
-        timestamp = int(time.time())
-
-    level = fields.get("crlevel", fields.get("level", "")).lower()
-    severity = LEVEL_TO_SEVERITY.get(level, "unknown")
-
-    proto_raw = fields.get("proto", "")
-    protocol = PROTO_MAP.get(proto_raw, proto_raw) if proto_raw else None
-
-    srcport = fields.get("srcport")
-    dstport = fields.get("dstport")
-
-    return {
-        "workspaceId": workspace_id,
-        "timestamp": timestamp,
-        "severity": severity,
-        "vendor": "fortigate",
-        "eventType": fields.get("type", "unknown"),
-        "action": fields.get("action") or None,
-        "application": fields.get("app", fields.get("service")) or None,
-        "protocol": protocol,
-        "policy": fields.get("policyid") or None,
-        "sourceIp": fields.get("srcip") or None,
-        "sourcePort": int(srcport) if srcport and srcport.isdigit() else None,
-        "destinationIp": fields.get("dstip") or None,
-        "destinationPort": int(dstport) if dstport and dstport.isdigit() else None,
-        "srcCountry": fields.get("srccountry") or None,
-        "dstCountry": fields.get("dstcountry") or None,
-        "rawLog": raw_message,
-    }
+# def fortigate_to_ingest(fields: dict, workspace_id: str, raw_message: str) -> dict:
+#     """Convert parsed FortiGate fields to the /logs/ingest payload format (regex fallback)."""
+#     eventtime = fields.get("eventtime", "")
+#     if eventtime and len(eventtime) > 10:
+#         timestamp = int(eventtime[:10])
+#     elif eventtime:
+#         timestamp = int(eventtime)
+#     else:
+#         timestamp = int(time.time())
+#
+#     level = fields.get("crlevel", fields.get("level", "")).lower()
+#     severity = LEVEL_TO_SEVERITY.get(level, "unknown")
+#
+#     proto_raw = fields.get("proto", "")
+#     protocol = PROTO_MAP.get(proto_raw, proto_raw) if proto_raw else None
+#
+#     srcport = fields.get("srcport")
+#     dstport = fields.get("dstport")
+#
+#     return {
+#         "workspaceId": workspace_id,
+#         "timestamp": timestamp,
+#         "severity": severity,
+#         "vendor": "fortigate",
+#         "eventType": fields.get("type", "unknown"),
+#         "action": fields.get("action") or None,
+#         "application": fields.get("app", fields.get("service")) or None,
+#         "protocol": protocol,
+#         "policy": fields.get("policyid") or None,
+#         "sourceIp": fields.get("srcip") or None,
+#         "sourcePort": int(srcport) if srcport and srcport.isdigit() else None,
+#         "destinationIp": fields.get("dstip") or None,
+#         "destinationPort": int(dstport) if dstport and dstport.isdigit() else None,
+#         "srcCountry": fields.get("srccountry") or None,
+#         "dstCountry": fields.get("dstcountry") or None,
+#         "rawLog": raw_message,
+#     }
 
 
 def get_severity_color(fields: dict) -> str:
@@ -339,14 +339,12 @@ class LlmLogIngester:
         try:
             self._queue.put_nowait(batch)
         except queue.Full:
-            # LLM worker is behind — parse with regex and send directly
             print(
-                f"{COLORS['warning']}  LLM queue full — regex fallback for "
+                f"{COLORS['warning']}  LLM queue full — dropping "
                 f"{len(batch)} log(s){COLORS['reset']}",
                 file=sys.stderr, flush=True,
             )
             self._fallbacks += 1
-            self._fallback_send(batch)
 
     def _llm_worker(self):
         while self._running:
@@ -355,16 +353,23 @@ class LlmLogIngester:
             except queue.Empty:
                 continue
             try:
+                print(
+                    f"{COLORS['info']}  LLM parsing batch of {len(batch)} log(s)...{COLORS['reset']}",
+                    flush=True,
+                )
                 logs = self._llm_parse(batch)
+                print(
+                    f"{COLORS['success']}  LLM returned {len(logs)} parsed log(s){COLORS['reset']}",
+                    flush=True,
+                )
                 self._send(logs)
                 self._llm_calls += 1
             except Exception as e:
                 print(
-                    f"{COLORS['error']}  LLM parse failed ({e}) — regex fallback{COLORS['reset']}",
+                    f"{COLORS['error']}  LLM parse failed ({e}) — dropping batch{COLORS['reset']}",
                     file=sys.stderr, flush=True,
                 )
                 self._fallbacks += 1
-                self._fallback_send(batch)
             finally:
                 self._queue.task_done()
 
@@ -396,6 +401,10 @@ class LlmLogIngester:
             result = json.loads(resp.read().decode("utf-8"))
 
         content = result["choices"][0]["message"]["content"]
+        print(
+            f"{COLORS['timestamp']}  LLM response: {content[:500]}{COLORS['reset']}",
+            flush=True,
+        )
         parsed = json.loads(content)
         logs = parsed.get("logs", [])
 
@@ -405,14 +414,14 @@ class LlmLogIngester:
 
         return logs
 
-    def _fallback_send(self, raw_logs: list[str]):
-        """Regex-parse and send directly, bypassing the LLM."""
-        batch = []
-        for raw in raw_logs:
-            fields = parse_fortigate_log(raw)
-            if fields:
-                batch.append(fortigate_to_ingest(fields, self.workspace_id, raw))
-        self._send(batch)
+    # def _fallback_send(self, raw_logs: list[str]):
+    #     """Regex-parse and send directly, bypassing the LLM."""
+    #     batch = []
+    #     for raw in raw_logs:
+    #         fields = parse_fortigate_log(raw)
+    #         if fields:
+    #             batch.append(fortigate_to_ingest(fields, self.workspace_id, raw))
+    #     self._send(batch)
 
     def _send(self, batch: list[dict]):
         if not batch:
@@ -425,8 +434,12 @@ class LlmLogIngester:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=10):
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 self._sent += len(batch)
+                print(
+                    f"{COLORS['success']}  Ingested {len(batch)} log(s) to API{COLORS['reset']}",
+                    flush=True,
+                )
         except urllib.error.HTTPError as e:
             self._errors += len(batch)
             body = e.read().decode("utf-8", errors="replace")[:200]

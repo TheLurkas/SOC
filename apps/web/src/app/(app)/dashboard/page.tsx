@@ -131,6 +131,25 @@ export default function Dashboard() {
 
   const openAlerts = alertStats ? alertStats.open + alertStats.acknowledged + alertStats.investigating : 0;
 
+  // build country heatmap lookup — maps country name to a fill color
+  const countryHeat = useMemo(() => {
+    const heatmap = dashStats?.countryHeatmap;
+    if (!heatmap || heatmap.length === 0) return new Map<string, { count: number; color: string }>();
+
+    const maxCount = Math.max(...heatmap.map((c) => c.count));
+    const map = new Map<string, { count: number; color: string }>();
+    for (const { country, count } of heatmap) {
+      // intensity 0-1 based on log count
+      const t = maxCount > 0 ? count / maxCount : 0;
+      // interpolate from dark teal to bright red
+      const lightness = 0.30 + t * 0.25;
+      const chroma = 0.05 + t * 0.20;
+      const hue = 200 - t * 175; // 200 (teal) → 25 (red)
+      map.set(country, { count, color: `oklch(${lightness} ${chroma} ${hue})` });
+    }
+    return map;
+  }, [dashStats?.countryHeatmap]);
+
   return (
     <div className="p-6 space-y-4 max-w-[1600px] mx-auto">
       <div className="flex items-center justify-between">
@@ -242,19 +261,25 @@ export default function Dashboard() {
                     <Graticule stroke="oklch(0.20 0.01 250)" strokeWidth={0.2} />
                     <Geographies geography={GEO_URL}>
                       {({ geographies }) =>
-                        geographies.map((geo) => (
-                          <Geography
-                            key={geo.rsmKey}
-                            geography={geo}
-                            onMouseEnter={() => setTooltipContent(geo.properties.name || "")}
-                            onMouseLeave={() => setTooltipContent("")}
-                            style={{
-                              default: { fill: "oklch(0.22 0.015 250)", stroke: "oklch(0.30 0.02 250)", strokeWidth: 0.4, outline: "none" },
-                              hover: { fill: "oklch(0.30 0.04 220)", stroke: "oklch(0.40 0.03 250)", strokeWidth: 0.4, outline: "none" },
-                              pressed: { fill: "oklch(0.28 0.03 220)", outline: "none" },
-                            }}
-                          />
-                        ))
+                        geographies.map((geo) => {
+                          const name = geo.properties.name || "";
+                          const heat = countryHeat.get(name);
+                          const defaultFill = heat ? heat.color : "oklch(0.22 0.015 250)";
+                          const label = heat ? `${name} — ${heat.count.toLocaleString()} logs` : name;
+                          return (
+                            <Geography
+                              key={geo.rsmKey}
+                              geography={geo}
+                              onMouseEnter={() => setTooltipContent(label)}
+                              onMouseLeave={() => setTooltipContent("")}
+                              style={{
+                                default: { fill: defaultFill, stroke: "oklch(0.30 0.02 250)", strokeWidth: 0.4, outline: "none" },
+                                hover: { fill: heat ? heat.color : "oklch(0.30 0.04 220)", stroke: "oklch(0.45 0.03 250)", strokeWidth: 0.6, outline: "none" },
+                                pressed: { fill: "oklch(0.28 0.03 220)", outline: "none" },
+                              }}
+                            />
+                          );
+                        })
                       }
                     </Geographies>
                   </ComposableMap>
