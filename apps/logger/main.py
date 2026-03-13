@@ -2,8 +2,17 @@
 """
 FortiGate Real-Time Log Listener (Syslog Server)
 
-Receives syslog from a FortiGate firewall and optionally forwards
-parsed logs to the SOC platform's ingest API.
+Receives syslog from a FortiGate firewall, buffers raw messages, and
+periodically sends them to an LLM for structured parsing before forwarding
+to the SOC platform's ingest API.
+
+Trigger conditions (whichever fires first):
+  - Buffer reaches --batch-size logs (default: 10)
+  - --flush-interval seconds have elapsed (default: 30)
+
+Burst protection: a bounded queue (--max-pending, default: 5) decouples
+buffering from the single LLM worker thread. If the queue is full, the
+batch falls back to regex parsing and is sent directly — no logs are dropped.
 
 SETUP ON FORTIGATE (CLI):
     config log syslogd setting
@@ -27,16 +36,17 @@ USAGE:
     # Listen only (no ingestion):
         python main.py --port 514
 
-    # Listen and ingest to SOC platform:
-        python main.py --port 514 --workspace-id <WORKSPACE_CUID> --api-url http://localhost:3001
+    # Listen and ingest (LLM parsing):
+        python main.py --port 514 --workspace-id <CUID> --api-url http://localhost:3001 --openai-key sk-...
 
     # With raw output and file logging:
-        python main.py --port 514 --workspace-id <ID> --raw --output logs.txt
+        python main.py --port 514 --workspace-id <ID> --openai-key sk-... --raw --output logs.txt
 """
 
 import argparse
 import datetime
 import json
+import queue
 import re
 import signal
 import socketserver
@@ -104,8 +114,7 @@ def parse_fortigate_log(raw_message: str) -> dict:
 
 
 def fortigate_to_ingest(fields: dict, workspace_id: str, raw_message: str) -> dict:
-    """Convert parsed FortiGate fields to the /logs/ingest payload format."""
-    # eventtime is nanoseconds, fall back to current time
+    """Convert parsed FortiGate fields to the /logs/ingest payload format (regex fallback)."""
     eventtime = fields.get("eventtime", "")
     if eventtime and len(eventtime) > 10:
         timestamp = int(eventtime[:10])
@@ -114,11 +123,9 @@ def fortigate_to_ingest(fields: dict, workspace_id: str, raw_message: str) -> di
     else:
         timestamp = int(time.time())
 
-    # severity from crlevel first, then level
     level = fields.get("crlevel", fields.get("level", "")).lower()
     severity = LEVEL_TO_SEVERITY.get(level, "unknown")
 
-    # protocol: numeric -> name
     proto_raw = fields.get("proto", "")
     protocol = PROTO_MAP.get(proto_raw, proto_raw) if proto_raw else None
 
@@ -139,6 +146,8 @@ def fortigate_to_ingest(fields: dict, workspace_id: str, raw_message: str) -> di
         "sourcePort": int(srcport) if srcport and srcport.isdigit() else None,
         "destinationIp": fields.get("dstip") or None,
         "destinationPort": int(dstport) if dstport and dstport.isdigit() else None,
+        "srcCountry": fields.get("srccountry") or None,
+        "dstCountry": fields.get("dstcountry") or None,
         "rawLog": raw_message,
     }
 
@@ -225,34 +234,93 @@ def format_log(raw_message: str, use_color: bool = True) -> str:
     return " ".join(parts)
 
 
-class LogIngester:
-    """Batches logs and sends them to the SOC API in the background."""
+# LLM system prompt — tells the model exactly what to extract from raw FortiGate syslogs
+_LLM_SYSTEM_PROMPT = """\
+You are a FortiGate syslog parser. Given raw FortiGate syslog messages, extract structured \
+fields and return a JSON object with a "logs" array — one entry per input message.
 
-    def __init__(self, api_url: str, workspace_id: str,
-                 batch_size: int = 10, flush_interval: float = 2.0):
+For each message extract:
+- workspaceId: always use the workspace_id provided in the input
+- timestamp: integer unix epoch (from eventtime field, keep only first 10 digits; \
+fall back to current unix time if missing)
+- severity: map FortiGate level → "critical" (emergency/alert/critical), "high" (error), \
+"medium" (warning), "low" (notice/information), "unknown" (anything else or missing)
+- vendor: always "fortigate"
+- eventType: value of the 'type' field (e.g. traffic, threat, system, event)
+- action: 'action' field or null
+- application: 'app' field, fallback to 'service', or null
+- protocol: translate 'proto' numeric field (1→icmp, 6→tcp, 17→udp, 47→gre, 50→esp, \
+51→ah, 58→icmpv6, 89→ospf); if already a name keep it; null if missing
+- policy: 'policyid' field or null
+- sourceIp: 'srcip' field or null
+- sourcePort: 'srcport' as integer or null
+- destinationIp: 'dstip' field or null
+- destinationPort: 'dstport' as integer or null
+- srcCountry: 'srccountry' field or null
+- dstCountry: 'dstcountry' field or null
+- rawLog: the original raw log string, verbatim
+
+Return ONLY valid JSON in this exact shape: {"logs": [...]}
+"""
+
+
+class LlmLogIngester:
+    """
+    Buffers incoming raw syslog messages and periodically parses them in
+    batches via an LLM before forwarding structured results to the SOC API.
+
+    Trigger conditions (whichever fires first):
+      - buffer reaches batch_size logs
+      - flush_interval seconds have elapsed
+
+    Burst protection: batches are placed in a bounded queue consumed by a
+    single worker thread. If the queue is full the batch falls back to
+    regex parsing and is sent directly — no logs are dropped, no threads block.
+    """
+
+    def __init__(
+        self,
+        api_url: str,
+        workspace_id: str,
+        openai_key: str,
+        batch_size: int = 10,
+        flush_interval: float = 30.0,
+        llm_model: str = "gpt-4.1-mini",
+        max_pending: int = 5,
+    ):
         self.api_url = api_url.rstrip("/")
         self.workspace_id = workspace_id
+        self.openai_key = openai_key
         self.batch_size = batch_size
         self.flush_interval = flush_interval
-        self._buffer = []
+        self.llm_model = llm_model
+
+        self._buffer: list[str] = []
         self._lock = threading.Lock()
+        self._queue: queue.Queue = queue.Queue(maxsize=max_pending)
+        self._running = True
+
+        # stats
         self._sent = 0
         self._errors = 0
-        self._running = True
+        self._llm_calls = 0
+        self._fallbacks = 0
+
+        self._worker = threading.Thread(target=self._llm_worker, daemon=True)
+        self._worker.start()
 
         self._timer = threading.Thread(target=self._flush_loop, daemon=True)
         self._timer.start()
 
-    def add(self, fields: dict, raw_message: str):
-        payload = fortigate_to_ingest(fields, self.workspace_id, raw_message)
+    def add(self, raw_message: str):
         with self._lock:
-            self._buffer.append(payload)
+            self._buffer.append(raw_message)
             if len(self._buffer) >= self.batch_size:
                 batch = self._buffer[:]
                 self._buffer.clear()
             else:
                 return
-        self._send(batch)
+        self._enqueue_or_fallback(batch)
 
     def _flush_loop(self):
         while self._running:
@@ -265,15 +333,97 @@ class LogIngester:
                 return
             batch = self._buffer[:]
             self._buffer.clear()
+        self._enqueue_or_fallback(batch)
+
+    def _enqueue_or_fallback(self, batch: list[str]):
+        try:
+            self._queue.put_nowait(batch)
+        except queue.Full:
+            # LLM worker is behind — parse with regex and send directly
+            print(
+                f"{COLORS['warning']}  LLM queue full — regex fallback for "
+                f"{len(batch)} log(s){COLORS['reset']}",
+                file=sys.stderr, flush=True,
+            )
+            self._fallbacks += 1
+            self._fallback_send(batch)
+
+    def _llm_worker(self):
+        while self._running:
+            try:
+                batch = self._queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                logs = self._llm_parse(batch)
+                self._send(logs)
+                self._llm_calls += 1
+            except Exception as e:
+                print(
+                    f"{COLORS['error']}  LLM parse failed ({e}) — regex fallback{COLORS['reset']}",
+                    file=sys.stderr, flush=True,
+                )
+                self._fallbacks += 1
+                self._fallback_send(batch)
+            finally:
+                self._queue.task_done()
+
+    def _llm_parse(self, raw_logs: list[str]) -> list[dict]:
+        """Call OpenAI to parse raw syslog lines into structured log dicts."""
+        payload = json.dumps({
+            "model": self.llm_model,
+            "messages": [
+                {"role": "system", "content": _LLM_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps({
+                    "workspace_id": self.workspace_id,
+                    "raw_logs": raw_logs,
+                })},
+            ],
+            "response_format": {"type": "json_object"},
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.openai_key}",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+
+        content = result["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        logs = parsed.get("logs", [])
+
+        # always enforce correct workspaceId regardless of what the LLM returned
+        for log in logs:
+            log["workspaceId"] = self.workspace_id
+
+        return logs
+
+    def _fallback_send(self, raw_logs: list[str]):
+        """Regex-parse and send directly, bypassing the LLM."""
+        batch = []
+        for raw in raw_logs:
+            fields = parse_fortigate_log(raw)
+            if fields:
+                batch.append(fortigate_to_ingest(fields, self.workspace_id, raw))
         self._send(batch)
 
-    def _send(self, batch):
+    def _send(self, batch: list[dict]):
         if not batch:
             return
         url = f"{self.api_url}/logs/ingest"
         data = json.dumps(batch).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         try:
             with urllib.request.urlopen(req, timeout=10):
                 self._sent += len(batch)
@@ -290,9 +440,13 @@ class LogIngester:
     def stop(self):
         self._running = False
         self.flush()
+        self._queue.join()
 
     def print_stats(self):
         print(f"  Logs sent to API : {COLORS['success']}{self._sent}{COLORS['reset']}")
+        print(f"  LLM batches      : {COLORS['info']}{self._llm_calls}{COLORS['reset']}")
+        if self._fallbacks:
+            print(f"  Regex fallbacks  : {COLORS['warning']}{self._fallbacks}{COLORS['reset']}")
         if self._errors:
             print(f"  Ingest errors    : {COLORS['error']}{self._errors}{COLORS['reset']}")
 
@@ -321,11 +475,8 @@ class SyslogHandler(socketserver.BaseRequestHandler):
             reset = COLORS["reset"] if self.server.use_color else ""
             print(f"{raw_color}  RAW: {message}{reset}", flush=True)
 
-        # ingest to API
         if self.server.ingester:
-            fields = parse_fortigate_log(message)
-            if fields:
-                self.server.ingester.add(fields, message)
+            self.server.ingester.add(message)
 
         if self.server.log_file:
             plain = format_log(message, use_color=False)
@@ -350,11 +501,19 @@ class SyslogServer(socketserver.UDPServer):
 
 
 def print_banner(host: str, port: int, log_filter: str, output_file: str,
-                 workspace_id: str = None, api_url: str = None):
+                 workspace_id: str = None, api_url: str = None,
+                 llm_model: str = None, batch_size: int = None,
+                 flush_interval: float = None, max_pending: int = None):
     if workspace_id:
         ingest_line = f"{COLORS['success']}{api_url} -> {workspace_id}{COLORS['reset']}"
+        llm_line = (
+            f"{COLORS['info']}{llm_model}{COLORS['reset']}  "
+            f"batch={batch_size}  interval={flush_interval}s  "
+            f"max_pending={max_pending}"
+        )
     else:
         ingest_line = f"{COLORS['timestamp']}disabled (no --workspace-id){COLORS['reset']}"
+        llm_line = f"{COLORS['timestamp']}disabled{COLORS['reset']}"
 
     print(f"""
 {COLORS['header']}╔══════════════════════════════════════════════════════════╗
@@ -365,6 +524,7 @@ def print_banner(host: str, port: int, log_filter: str, output_file: str,
   Filter       : {COLORS['info']}{log_filter or 'None (showing all)'}{COLORS['reset']}
   Output file  : {COLORS['info']}{output_file or 'None (console only)'}{COLORS['reset']}
   API ingest   : {ingest_line}
+  LLM parser   : {llm_line}
 
   {COLORS['timestamp']}Press Ctrl+C to stop and show statistics{COLORS['reset']}
 
@@ -405,14 +565,14 @@ def print_stats_report(ingester=None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="FortiGate Real-Time Log Listener with SOC API ingestion",
+        description="FortiGate Real-Time Log Listener with LLM-powered SOC ingestion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py --port 514                                    # Listen only
-  python main.py --port 514 --workspace-id abc123              # Listen + ingest
-  python main.py --port 514 --workspace-id abc123 --raw        # With raw output
-  python main.py --port 514 --workspace-id abc123 --filter deny
+  python main.py --port 514                                             # Listen only
+  python main.py --port 514 --workspace-id abc123 --openai-key sk-...  # LLM ingestion
+  python main.py --port 514 --workspace-id abc123 --openai-key sk-... --batch-size 20 --flush-interval 60
+  python main.py --port 514 --workspace-id abc123 --openai-key sk-... --raw
         """,
     )
     parser.add_argument("--host", default="0.0.0.0",
@@ -433,8 +593,18 @@ Examples:
                         help="Workspace ID to ingest logs into (enables API forwarding)")
     parser.add_argument("--api-url", default="http://localhost:3001",
                         help="SOC API base URL (default: http://localhost:3001)")
+
+    # LLM parsing
+    parser.add_argument("--openai-key", default=None,
+                        help="OpenAI API key for LLM-powered log parsing")
+    parser.add_argument("--llm-model", default="gpt-4.1-mini",
+                        help="OpenAI model to use for parsing (default: gpt-4.1-mini)")
     parser.add_argument("--batch-size", type=int, default=10,
-                        help="Logs to batch before sending to API (default: 10)")
+                        help="Trigger LLM parse after this many logs (default: 10)")
+    parser.add_argument("--flush-interval", type=float, default=30.0,
+                        help="Trigger LLM parse after this many seconds (default: 30)")
+    parser.add_argument("--max-pending", type=int, default=5,
+                        help="Max queued LLM batches before falling back to regex (default: 5)")
 
     args = parser.parse_args()
     log_file = None
@@ -444,14 +614,27 @@ Examples:
         log_file = open(args.output, "a", encoding="utf-8")
 
     if args.workspace_id:
-        ingester = LogIngester(
+        if not args.openai_key:
+            print(
+                f"{COLORS['error']}ERROR: --openai-key is required when --workspace-id is set{COLORS['reset']}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        ingester = LlmLogIngester(
             api_url=args.api_url,
             workspace_id=args.workspace_id,
+            openai_key=args.openai_key,
             batch_size=args.batch_size,
+            flush_interval=args.flush_interval,
+            llm_model=args.llm_model,
+            max_pending=args.max_pending,
         )
 
-    print_banner(args.host, args.port, args.log_filter, args.output,
-                 args.workspace_id, args.api_url)
+    print_banner(
+        args.host, args.port, args.log_filter, args.output,
+        args.workspace_id, args.api_url,
+        args.llm_model, args.batch_size, args.flush_interval, args.max_pending,
+    )
 
     server = SyslogServer(
         (args.host, args.port),

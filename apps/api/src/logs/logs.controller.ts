@@ -47,6 +47,8 @@ export class LogsController {
       sourcePort: l.sourcePort ?? l.source?.port ?? null,
       destinationIp: l.destinationIp || l.destination?.ip || null,
       destinationPort: l.destinationPort ?? l.destination?.port ?? null,
+      srcCountry: l.srcCountry || null,
+      dstCountry: l.dstCountry || null,
       rawLog: l.rawLog,
     }));
 

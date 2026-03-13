@@ -117,6 +117,8 @@ export interface LogDto {
   sourcePort: number | null;
   destinationIp: string | null;
   destinationPort: number | null;
+  srcCountry: string | null;
+  dstCountry: string | null;
   rawLog: string;
   createdAt: string;
 }
@@ -135,6 +137,8 @@ export interface IngestLogDto {
   sourcePort?: number | null;
   destinationIp?: string | null;
   destinationPort?: number | null;
+  srcCountry?: string | null;
+  dstCountry?: string | null;
   source?: { ip?: string; port?: number };
   destination?: { ip?: string; port?: number };
   rawLog: string;

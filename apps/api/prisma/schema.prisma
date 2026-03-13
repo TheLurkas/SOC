@@ -130,6 +130,8 @@ model Log {
   sourcePort     Int?
   destinationIp  String?
   destinationPort Int?
+  srcCountry     String?
+  dstCountry     String?
   rawLog         String   // Full raw log text
   createdAt      DateTime @default(now())
 
