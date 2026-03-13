@@ -28,6 +28,7 @@ model user {
   alertNotes      AlertNote[]
   notifications   Notification[]
   analysisRules   AnalysisRule[]
+  llmUsages       LlmUsage[]
 }
 
 model session {
@@ -81,6 +82,7 @@ model Company {
 
   workspaces Workspace[]
   favoritedBy FavoriteCompany[]
+  llmUsages   LlmUsage[]
 
   @@map("companies")
 }
@@ -258,4 +260,27 @@ model Message {
 
   @@index([conversationId, createdAt])
   @@map("messages")
+}
+
+model LlmUsage {
+  id               String   @id @default(cuid())
+  userId           String?
+  companyId        String?
+  workspaceId      String?
+  conversationId   String?
+  model            String
+  purpose          String   // query | answer | title | auto_response
+  promptTokens     Int
+  completionTokens Int
+  totalTokens      Int
+  costUsd          Float    // calculated cost in USD
+  createdAt        DateTime @default(now())
+
+  user    user?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, createdAt])
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@map("llm_usage")
 }

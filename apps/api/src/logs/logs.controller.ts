@@ -168,6 +168,102 @@ export class LogsController {
     };
   }
 
+  @Get('company/:companyId/stats')
+  @UseGuards(AuthGuard)
+  async getCompanyStats(@Param('companyId') companyId: string) {
+    const company = await this.prisma.company.findUnique({
+      where: { id: companyId },
+      include: { workspaces: { select: { id: true } } },
+    });
+    if (!company) {
+      throw new HttpException('Company not found', HttpStatus.NOT_FOUND);
+    }
+
+    const wsIds = company.workspaces.map((w) => w.id);
+    if (wsIds.length === 0) {
+      return {
+        data: {
+          total: 0, severity: [], actions: [], eventTypes: [], vendors: [],
+          topSourceIps: [], topDestIps: [], volume: [],
+          openAlerts: 0, workspaceBreakdown: [],
+        },
+      };
+    }
+
+    const where = { workspaceId: { in: wsIds } };
+
+    const [
+      total, severityCounts, actionCounts, eventTypeCounts, vendorCounts,
+      topSourceIps, topDestIps, volumeOverTime, openAlerts, wsLogCounts,
+    ] = await Promise.all([
+      this.prisma.log.count({ where }),
+      this.prisma.log.groupBy({ by: ['severity'], where, _count: { severity: true } }),
+      this.prisma.log.groupBy({ by: ['action'], where: { ...where, action: { not: null } }, _count: { action: true } }),
+      this.prisma.log.groupBy({ by: ['eventType'], where, _count: { eventType: true } }),
+      this.prisma.log.groupBy({ by: ['vendor'], where, _count: { vendor: true } }),
+      this.prisma.log.groupBy({
+        by: ['sourceIp'], where: { ...where, sourceIp: { not: null } },
+        _count: { sourceIp: true }, orderBy: { _count: { sourceIp: 'desc' } }, take: 10,
+      }),
+      this.prisma.log.groupBy({
+        by: ['destinationIp'], where: { ...where, destinationIp: { not: null } },
+        _count: { destinationIp: true }, orderBy: { _count: { destinationIp: 'desc' } }, take: 10,
+      }),
+      this.prisma.log.findMany({ where, select: { timestamp: true }, orderBy: { timestamp: 'asc' } }),
+      this.prisma.alert.count({ where: { workspace: { companyId }, status: 'open' } }),
+      this.prisma.log.groupBy({
+        by: ['workspaceId'], where, _count: { _all: true },
+      }),
+    ]);
+
+    const timeBuckets: { time: string; count: number }[] = [];
+    if (volumeOverTime.length > 0) {
+      const timestamps = volumeOverTime.map((l) => l.timestamp);
+      const min = timestamps[0];
+      const max = timestamps[timestamps.length - 1];
+      const bucketSize = Math.max(Math.floor((max - min) / 12), 1);
+      const buckets: Record<number, number> = {};
+      for (const ts of timestamps) {
+        const bucket = Math.floor((ts - min) / bucketSize);
+        const bucketTs = min + bucket * bucketSize;
+        buckets[bucketTs] = (buckets[bucketTs] || 0) + 1;
+      }
+      for (const [ts, count] of Object.entries(buckets)) {
+        timeBuckets.push({
+          time: new Date(Number(ts) * 1000).toLocaleTimeString('en-GB', {
+            hour: '2-digit', minute: '2-digit', hour12: false,
+          }),
+          count,
+        });
+      }
+    }
+
+    // map workspace IDs back to names
+    const wsMap = new Map(company.workspaces.map((w) => [w.id, w.id]));
+    const wsNames = await this.prisma.workspace.findMany({
+      where: { id: { in: wsIds } }, select: { id: true, name: true },
+    });
+    for (const w of wsNames) wsMap.set(w.id, w.name);
+
+    return {
+      data: {
+        total,
+        severity: severityCounts.map((s) => ({ name: s.severity, value: s._count.severity })),
+        actions: actionCounts.map((a) => ({ name: a.action!, value: a._count.action })),
+        eventTypes: eventTypeCounts.map((e) => ({ name: e.eventType, value: e._count.eventType })),
+        vendors: vendorCounts.map((v) => ({ name: v.vendor, value: v._count.vendor })),
+        topSourceIps: topSourceIps.map((s) => ({ ip: s.sourceIp!, count: s._count.sourceIp })),
+        topDestIps: topDestIps.map((d) => ({ ip: d.destinationIp!, count: d._count.destinationIp })),
+        volume: timeBuckets,
+        openAlerts,
+        workspaceBreakdown: wsLogCounts.map((w) => ({
+          name: wsMap.get(w.workspaceId) || w.workspaceId,
+          value: w._count._all,
+        })),
+      },
+    };
+  }
+
   @Get('workspace/:workspaceId')
   @UseGuards(AuthGuard)
   async getByWorkspace(

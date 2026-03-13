@@ -43,6 +43,26 @@ interface LlmMessage {
   content: string;
 }
 
+interface LlmResult {
+  content: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+// GPT-5.1 pricing (per 1M tokens) — update if model changes
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  'gpt-5.1': { input: 2.00, output: 8.00 },
+  'gpt-4.1': { input: 2.00, output: 8.00 },
+  'gpt-4o': { input: 2.50, output: 10.00 },
+  'gpt-4o-mini': { input: 0.15, output: 0.60 },
+};
+
+function calcCostUsd(model: string, promptTokens: number, completionTokens: number): number {
+  const pricing = MODEL_PRICING[model] || MODEL_PRICING['gpt-5.1'];
+  return (promptTokens * pricing.input + completionTokens * pricing.output) / 1_000_000;
+}
+
 @Injectable()
 export class ChatService {
   private readonly logger = new Logger(ChatService.name);
@@ -191,14 +211,21 @@ export class ChatService {
     const effectiveCompanyId = companyId || convo.companyId;
     const effectiveWorkspaceId = workspaceId || convo.workspaceId;
 
+    const usageCtx = {
+      userId,
+      companyId: effectiveCompanyId || null,
+      workspaceId: effectiveWorkspaceId || null,
+      conversationId: convo.id,
+    };
+
     // call 1: generate query
-    const queryJson = await this.generateQuery(message, effectiveCompanyId, effectiveWorkspaceId, history, mentions);
+    const queryJson = await this.generateQuery(message, effectiveCompanyId, effectiveWorkspaceId, history, mentions, usageCtx);
 
     // execute query — mentions override scope
     const logs = await this.executePrismaQuery(queryJson, effectiveCompanyId, effectiveWorkspaceId, mentions);
 
     // call 2: generate answer
-    const reply = await this.generateAnswer(message, logs, history);
+    const reply = await this.generateAnswer(message, logs, history, usageCtx);
 
     // save assistant message
     const assistantMsg = await this.prisma.message.create({
@@ -213,7 +240,7 @@ export class ChatService {
     // auto-title on first message, then bump updatedAt
     let title: string | undefined;
     if (convo.messages.length === 0) {
-      title = await this.generateTitle(message, convo.id);
+      title = await this.generateTitle(message, convo.id, usageCtx);
     }
 
     await this.prisma.conversation.update({
@@ -237,16 +264,17 @@ export class ChatService {
 
   // ── Title generation ────────────────────────────────────────
 
-  private async generateTitle(firstMessage: string, conversationId: string): Promise<string | undefined> {
+  private async generateTitle(firstMessage: string, conversationId: string, usageCtx?: any): Promise<string | undefined> {
     try {
-      const raw = await this.callLlm([
+      const result = await this.callLlm([
         {
           role: 'system',
           content: 'Generate a short title (max 6 words) for a SOC chat conversation based on the user\'s first message. Return ONLY the title text, nothing else. No quotes.',
         },
         { role: 'user', content: firstMessage },
       ]);
-      const title = raw.trim().replace(/^["']|["']$/g, '').slice(0, 80);
+      if (usageCtx) this.recordUsage(result, 'title', usageCtx);
+      const title = result.content.trim().replace(/^["']|["']$/g, '').slice(0, 80);
       await this.prisma.conversation.update({
         where: { id: conversationId },
         data: { title },
@@ -266,6 +294,7 @@ export class ChatService {
     workspaceId?: string | null,
     history?: MessageDto[],
     mentions?: ChatMention[],
+    usageCtx?: any,
   ): Promise<any> {
     const contextParts: string[] = [];
 
@@ -338,17 +367,18 @@ User: "what happened today" (no scope)
 
     messages.push({ role: 'user', content: message });
 
-    const raw = await this.callLlm(messages);
+    const result = await this.callLlm(messages);
+    if (usageCtx) this.recordUsage(result, 'query', usageCtx);
 
     try {
       // strip markdown fences, leading/trailing text around the JSON
-      let cleaned = raw.replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
+      let cleaned = result.content.replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
       // extract the first JSON object if there's extra text
       const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
       if (jsonMatch) cleaned = jsonMatch[0];
       return JSON.parse(cleaned);
     } catch {
-      this.logger.warn(`LLM returned unparseable query, falling back to default. Raw: ${raw}`);
+      this.logger.warn(`LLM returned unparseable query, falling back to default. Raw: ${result.content}`);
       const fallback: any = { where: {}, orderBy: { timestamp: 'desc' } };
       if (workspaceId) fallback.where.workspaceId = workspaceId;
       if (companyId && !workspaceId) fallback.where.workspace = { companyId };
@@ -481,7 +511,7 @@ User: "what happened today" (no scope)
 
   // ── Answer generation ─────────────────────────────────────
 
-  private async generateAnswer(message: string, logs: any[], history?: MessageDto[]): Promise<string> {
+  private async generateAnswer(message: string, logs: any[], history?: MessageDto[], usageCtx?: any): Promise<string> {
     const logContext = this.buildLogContext(logs);
 
     // fetch admin-defined analysis rules
@@ -528,12 +558,14 @@ ${logs.length === 0 ? '- No logs matched the query. Let the user know and sugges
 
     messages.push({ role: 'user', content: userContent });
 
-    return this.callLlm(messages);
+    const result = await this.callLlm(messages);
+    if (usageCtx) this.recordUsage(result, 'answer', usageCtx);
+    return result.content;
   }
 
   // ── LLM caller ────────────────────────────────────────────
 
-  private async callLlm(messages: LlmMessage[]): Promise<string> {
+  private async callLlm(messages: LlmMessage[]): Promise<LlmResult> {
     const { baseUrl, model, apiKey } = getOpenAiConfig();
     const res = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
@@ -554,6 +586,39 @@ ${logs.length === 0 ? '- No logs matched the query. Let the user know and sugges
     }
 
     const data = await res.json();
-    return data.choices?.[0]?.message?.content || 'No response from model.';
+    const usage = data.usage || {};
+    return {
+      content: data.choices?.[0]?.message?.content || 'No response from model.',
+      promptTokens: usage.prompt_tokens || 0,
+      completionTokens: usage.completion_tokens || 0,
+      totalTokens: usage.total_tokens || 0,
+    };
+  }
+
+  private async recordUsage(
+    result: LlmResult,
+    purpose: string,
+    ctx: { userId?: string; companyId?: string | null; workspaceId?: string | null; conversationId?: string },
+  ) {
+    const model = getOpenAiConfig().model;
+    const costUsd = calcCostUsd(model, result.promptTokens, result.completionTokens);
+    try {
+      await this.prisma.llmUsage.create({
+        data: {
+          userId: ctx.userId || null,
+          companyId: ctx.companyId || null,
+          workspaceId: ctx.workspaceId || null,
+          conversationId: ctx.conversationId || null,
+          model,
+          purpose,
+          promptTokens: result.promptTokens,
+          completionTokens: result.completionTokens,
+          totalTokens: result.totalTokens,
+          costUsd,
+        },
+      });
+    } catch (err) {
+      this.logger.warn(`Failed to record LLM usage: ${err}`);
+    }
   }
 }

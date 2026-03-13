@@ -13,7 +13,7 @@ export class DashboardController {
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const twentyFourHoursAgo = Math.floor((now.getTime() - 24 * 60 * 60 * 1000) / 1000);
 
-    const [totalLogs, logRows, alertRows] = await Promise.all([
+    const [totalLogs, logRows, alertRows, alertsByCompanyRaw] = await Promise.all([
       this.prisma.log.count(),
 
       // logs from last 24h for volume chart
@@ -27,6 +27,12 @@ export class DashboardController {
       this.prisma.alert.findMany({
         where: { createdAt: { gte: sevenDaysAgo } },
         select: { createdAt: true, severity: true },
+      }),
+
+      // alerts per company
+      this.prisma.alert.groupBy({
+        by: ['workspaceId'],
+        _count: { _all: true },
       }),
     ]);
 
@@ -91,11 +97,37 @@ export class DashboardController {
       alertsByDay.push({ day, ...counts });
     }
 
+    // aggregate alerts per company
+    const wsIds = alertsByCompanyRaw.map((r) => r.workspaceId);
+    const workspaces = wsIds.length > 0
+      ? await this.prisma.workspace.findMany({
+          where: { id: { in: wsIds } },
+          select: { id: true, companyId: true, company: { select: { name: true } } },
+        })
+      : [];
+    const wsToCompany = new Map(workspaces.map((w) => [w.id, { id: w.companyId, name: w.company.name }]));
+
+    const companyAlertMap = new Map<string, { name: string; count: number }>();
+    for (const row of alertsByCompanyRaw) {
+      const company = wsToCompany.get(row.workspaceId);
+      if (!company) continue;
+      const existing = companyAlertMap.get(company.id);
+      if (existing) {
+        existing.count += row._count._all;
+      } else {
+        companyAlertMap.set(company.id, { name: company.name, count: row._count._all });
+      }
+    }
+    const alertsByCompany = [...companyAlertMap.values()]
+      .sort((a, b) => b.count - a.count)
+      .map((c) => ({ name: c.name, alerts: c.count }));
+
     return {
       data: {
         totalLogs,
         logVolume,
         alertsByDay,
+        alertsByCompany,
       },
     };
   }

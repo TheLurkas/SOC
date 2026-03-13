@@ -63,6 +63,17 @@ export function Navbar({ onChatToggle, chatOpen }: NavbarProps) {
                 Rules
               </Link>
               <Link
+                href="/usage"
+                className={cn(
+                  "px-3 py-1 text-sm rounded-md transition-colors",
+                  pathname.startsWith("/usage")
+                    ? "text-foreground bg-secondary"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Usage
+              </Link>
+              <Link
                 href="/users"
                 className={cn(
                   "px-3 py-1 text-sm rounded-md transition-colors",
