@@ -133,6 +133,7 @@ model Log {
   srcCountry     String?
   dstCountry     String?
   rawLog         String   // Full raw log text
+  analyzed       Boolean  @default(false)
   createdAt      DateTime @default(now())
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -142,6 +143,7 @@ model Log {
   @@index([workspaceId, vendor])
   @@index([sourceIp])
   @@index([destinationIp])
+  @@index([analyzed, workspaceId])
   @@map("logs")
 }
 

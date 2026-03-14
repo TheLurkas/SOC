@@ -8,6 +8,15 @@ import { useNotificationSocket } from "@/lib/socket";
 import { authClient } from "@/lib/auth-client";
 import type { NotificationDto } from "@soc/shared";
 
+import { playSound } from "@/lib/sounds";
+
+const NOTIFICATION_SOUNDS: Record<string, string> = {
+  assigned: "notification.mp3",
+  unassigned: "notification.mp3",
+  status_changed: "notification.mp3",
+  note_added: "notification.mp3",
+};
+
 const typeIcons: Record<string, typeof Bell> = {
   assigned: UserCheck,
   unassigned: ArrowRightLeft,
@@ -45,6 +54,7 @@ export function NotificationBell() {
   useNotificationSocket(userId, (notification) => {
     setNotifications((prev) => [notification, ...prev].slice(0, 50));
     setUnreadCount((prev) => prev + 1);
+    playSound(NOTIFICATION_SOUNDS[notification.type] || "notification.mp3");
     toast.info(notification.title, {
       description: notification.body || undefined,
     });
