@@ -159,6 +159,17 @@ export class AnalysisService {
     const uniqueSrcIps = [...new Set(batch.map((l) => l.sourceIp).filter(Boolean) as string[])];
     const reputations = await this.reputation.getCached(uniqueSrcIps);
 
+    // find IPs already blocked by a completed auto-response in this workspace
+    const blockedResponses = await this.prisma.autoResponse.findMany({
+      where: {
+        workspaceId,
+        status: 'completed',
+        alert: { sourceIp: { in: uniqueSrcIps } },
+      },
+      select: { alert: { select: { sourceIp: true } } },
+    });
+    const blockedIps = new Set(blockedResponses.map((r) => r.alert.sourceIp).filter(Boolean));
+
     // build compact log data (no rawLog to save tokens)
     const compactLogs = batch.map((l) => ({
       timestamp: l.timestamp,
@@ -195,6 +206,10 @@ export class AnalysisService {
       ? `\nIP REPUTATION (AbuseIPDB scores, 0-100 where higher = more malicious):\n${repLines}\n- Score ≥ 80: likely malicious — treat as high-confidence threat indicator\n- Score 25-79: suspicious — consider as supporting evidence\n`
       : '';
 
+    const blockedIpsText = blockedIps.size > 0
+      ? `\nALREADY BLOCKED IPs (auto-response commands have been successfully executed on the device for these IPs — do NOT generate new alerts for traffic from them):\n${[...blockedIps].join(', ')}\n`
+      : '';
+
     const systemPrompt = `You are an automated SOC alert generator. You analyze firewall/network logs and decide whether any security alerts should be generated based on the analysis rules provided.
 
 ANALYSIS RULES:
@@ -202,10 +217,11 @@ ${rulesText}
 
 EXISTING OPEN ALERTS (do NOT create duplicates of these):
 ${existingAlertsText}
-${repContext}
+${blockedIpsText}${repContext}
 INSTRUCTIONS:
 - Examine the logs below and apply the analysis rules.
 - Only generate alerts when the evidence clearly warrants it. Do not over-alert.
+- Do NOT generate alerts for IPs listed under "ALREADY BLOCKED IPs" — these have already been mitigated by the auto-response system. Logs from these IPs are expected residual traffic before the block fully takes effect.
 - Each alert should represent a distinct security concern backed by multiple log entries when possible.
 - If a source IP has an abuse score ≥ 80, treat it as a confirmed threat indicator and elevate alert severity accordingly.
 - Return a JSON object with an "alerts" array. If no alerts are warranted, return {"alerts": []}.
