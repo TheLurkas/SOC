@@ -1,67 +1,227 @@
 import { Injectable, Logger, HttpException, HttpStatus } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import type { ChatRequestDto, ChatResponseDto, MessageDto, ConversationDto, ConversationDetailDto, MentionSuggestionDto, ChatMention } from '@soc/shared';
+import type {
+  ChatRequestDto,
+  ChatResponseDto,
+  MessageDto,
+  ConversationDto,
+  ConversationDetailDto,
+  MentionSuggestionDto,
+  ChatMention,
+} from '@soc/shared';
 
-// read at call time so dotenv is guaranteed to have loaded
 const getOpenAiConfig = () => ({
   baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
   model: process.env.OPENAI_MODEL || 'gpt-5.1',
   apiKey: process.env.OPENAI_API_KEY || '',
 });
 
-const LOG_SCHEMA = `
-Table: logs
-Columns:
-  id             String (cuid)
-  workspaceId    String
-  timestamp      Int (Unix epoch seconds)
-  severity       String (unknown | low | medium | high | critical)
-  vendor         String (e.g. "paloalto")
-  eventType      String (e.g. "traffic", "threat", "system")
-  action         String? (e.g. "allow", "deny", "drop")
-  application    String? (e.g. "soap", "ssl", "web-browsing")
-  protocol       String? (e.g. "tcp", "udp")
-  policy         String? (e.g. "Allow Tap Traffic")
-  sourceIp       String?
-  sourcePort     Int?
-  destinationIp  String?
-  destinationPort Int?
-  rawLog         String (full raw syslog text)
-  createdAt      DateTime
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  'gpt-5.1':      { input: 2.00,  output: 8.00  },
+  'gpt-4.1':      { input: 2.00,  output: 8.00  },
+  'gpt-4o':       { input: 2.50,  output: 10.00 },
+  'gpt-4o-mini':  { input: 0.15,  output: 0.60  },
+  'gpt-4.1-mini': { input: 0.40,  output: 1.60  },
+};
 
-Table: workspaces
-Columns:
-  id          String (cuid)
-  companyId   String
-  name        String
-
-Relation: logs.workspaceId -> workspaces.id
-`;
-
-interface LlmMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+function calcCostUsd(model: string, promptTokens: number, completionTokens: number): number {
+  const pricing = MODEL_PRICING[model] ?? MODEL_PRICING['gpt-5.1'];
+  return (promptTokens * pricing.input + completionTokens * pricing.output) / 1_000_000;
 }
 
-interface LlmResult {
-  content: string;
+// ── Types ────────────────────────────────────────────────────
+
+interface ScopeConstraints {
+  workspaceId?: string | null;
+  companyId?: string | null;
+  mentions?: ChatMention[];
+}
+
+interface LlmMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | null;
+  tool_calls?: any[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+interface LlmUsageTokens {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
 }
 
-// GPT-5.1 pricing (per 1M tokens) — update if model changes
-const MODEL_PRICING: Record<string, { input: number; output: number }> = {
-  'gpt-5.1': { input: 2.00, output: 8.00 },
-  'gpt-4.1': { input: 2.00, output: 8.00 },
-  'gpt-4o': { input: 2.50, output: 10.00 },
-  'gpt-4o-mini': { input: 0.15, output: 0.60 },
-};
-
-function calcCostUsd(model: string, promptTokens: number, completionTokens: number): number {
-  const pricing = MODEL_PRICING[model] || MODEL_PRICING['gpt-5.1'];
-  return (promptTokens * pricing.input + completionTokens * pricing.output) / 1_000_000;
+interface AgentResult {
+  content: string;
+  dataUsed: number;
+  usage: LlmUsageTokens;
 }
+
+// ── Tool definitions ─────────────────────────────────────────
+
+const TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'search_logs',
+      description:
+        'Search and filter security logs. Use for questions about network traffic, events, threats, actions, source/destination IPs, protocols, applications, vendors, or countries.',
+      parameters: {
+        type: 'object',
+        properties: {
+          where: {
+            type: 'object',
+            description:
+              'Prisma where clause for the Log model. Fields: workspaceId (String), timestamp (Int, unix epoch), severity (unknown|low|medium|high|critical), vendor (String), eventType (String), action (String), application (String), protocol (String), sourceIp (String), destinationIp (String), srcCountry (String), dstCountry (String). Use Prisma operators: in, notIn, lt, lte, gt, gte, contains with mode:"insensitive".',
+          },
+          orderBy: {
+            type: 'object',
+            description: 'Sort order. Default: { "timestamp": "desc" }',
+          },
+          take: {
+            type: 'number',
+            description:
+              'Max logs to return. Only set if the user asked for a specific number. Omit to let the system decide.',
+          },
+        },
+        required: ['where'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_alerts',
+      description:
+        'Get security alerts. Use for questions about open/critical/resolved/investigating alerts, alert counts, incidents, who is assigned, alert history.',
+      parameters: {
+        type: 'object',
+        properties: {
+          workspaceId:  { type: 'string', description: 'Filter by workspace ID' },
+          companyId:    { type: 'string', description: 'Filter across all workspaces of this company ID' },
+          status:       { type: 'string', enum: ['open', 'acknowledged', 'investigating', 'resolved'] },
+          severity:     { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
+          assigneeId:   { type: 'string', description: 'Filter by assigned analyst user ID' },
+          unassigned:   { type: 'boolean', description: 'If true, return only alerts with no assignee' },
+          from:         { type: 'number', description: 'Unix timestamp — alerts created after this time' },
+          to:           { type: 'number', description: 'Unix timestamp — alerts created before this time' },
+          take:         { type: 'number', description: 'Max alerts to return (default 50)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_alert_detail',
+      description:
+        'Get full details of a specific alert including analyst notes and the complete activity timeline. Use when the user asks about a specific alert by ID or when you need notes/history.',
+      parameters: {
+        type: 'object',
+        properties: {
+          alertId: { type: 'string', description: 'The alert ID' },
+        },
+        required: ['alertId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_companies',
+      description:
+        'List client companies being monitored. Use for questions about clients, company names, how many companies exist, contact details.',
+      parameters: {
+        type: 'object',
+        properties: {
+          search: { type: 'string', description: 'Filter by name (case-insensitive partial match)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_workspaces',
+      description:
+        'List monitored environments (workspaces). Use for questions about environments, specific workspaces, auto-response status.',
+      parameters: {
+        type: 'object',
+        properties: {
+          companyId: { type: 'string', description: 'Filter by company ID' },
+          search:    { type: 'string', description: 'Filter by name (case-insensitive partial match)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_users',
+      description:
+        'List SOC analysts and admins. Use for questions about team members, roles, who is on the team.',
+      parameters: {
+        type: 'object',
+        properties: {
+          role: { type: 'string', enum: ['admin', 'analyst'], description: 'Filter by role (omit for all)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_analysis_rules',
+      description:
+        'List analysis rules configured in the SOC platform. Use for questions about detection rules, what rules are active, etc.',
+      parameters: {
+        type: 'object',
+        properties: {
+          enabled:  { type: 'boolean', description: 'Filter by enabled status (omit for all)' },
+          category: { type: 'string', description: 'Filter by category: general, threat, compliance, network, custom' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_usage_stats',
+      description:
+        'Get LLM/AI usage records — cost, token counts, API calls by model/purpose/user/company. Use for questions about AI spend, usage, or costs.',
+      parameters: {
+        type: 'object',
+        properties: {
+          from:      { type: 'number', description: 'Unix timestamp — start of period' },
+          to:        { type: 'number', description: 'Unix timestamp — end of period' },
+          companyId: { type: 'string', description: 'Filter by company ID' },
+          userId:    { type: 'string', description: 'Filter by user ID' },
+          purpose:   { type: 'string', description: 'Filter by purpose: query, answer, title, auto_response' },
+          take:      { type: 'number', description: 'Max records to return (default 100)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_ip_reputation',
+      description:
+        'Look up cached AbuseIPDB reputation data for a specific IP address — abuse score, ISP, country, reports.',
+      parameters: {
+        type: 'object',
+        properties: {
+          ip: { type: 'string', description: 'IP address to look up' },
+        },
+        required: ['ip'],
+      },
+    },
+  },
+];
+
+const MAX_AGENT_ROUNDS = 6;
+
+// ── Service ──────────────────────────────────────────────────
 
 @Injectable()
 export class ChatService {
@@ -69,7 +229,7 @@ export class ChatService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  // ── Conversation CRUD ──────────────────────────────────────
+  // ── Conversation CRUD ────────────────────────────────────────
 
   async listConversations(userId: string): Promise<ConversationDto[]> {
     const convos = await this.prisma.conversation.findMany({
@@ -104,7 +264,7 @@ export class ChatService {
         id: m.id,
         role: m.role as 'user' | 'assistant',
         content: m.content,
-        logsUsed: m.logsUsed,
+        dataUsed: (m as any).dataUsed,
         createdAt: m.createdAt.toISOString(),
       })),
     };
@@ -118,13 +278,12 @@ export class ChatService {
     await this.prisma.conversation.delete({ where: { id: conversationId } });
   }
 
-  // ── @mention autocomplete ──────────────────────────────────
+  // ── @mention autocomplete ─────────────────────────────────────
 
   async getSuggestions(query: string, companyId?: string, workspaceId?: string): Promise<MentionSuggestionDto[]> {
     const results: MentionSuggestionDto[] = [];
 
     if (workspaceId && companyId) {
-      // inside a workspace: suggest sibling workspaces of the same company
       const workspaces = await this.prisma.workspace.findMany({
         where: { companyId, name: { contains: query, mode: 'insensitive' } },
         take: 10,
@@ -134,7 +293,6 @@ export class ChatService {
         results.push({ type: 'workspace', id: ws.id, name: ws.name });
       }
     } else if (companyId) {
-      // inside a company: suggest workspaces of this company
       const workspaces = await this.prisma.workspace.findMany({
         where: { companyId, name: { contains: query, mode: 'insensitive' } },
         take: 10,
@@ -144,7 +302,6 @@ export class ChatService {
         results.push({ type: 'workspace', id: ws.id, name: ws.name });
       }
     } else {
-      // dashboard: suggest companies first, then workspaces
       const companies = await this.prisma.company.findMany({
         where: { name: { contains: query, mode: 'insensitive' } },
         take: 8,
@@ -153,7 +310,6 @@ export class ChatService {
       for (const c of companies) {
         results.push({ type: 'company', id: c.id, name: c.name });
       }
-
       const workspaces = await this.prisma.workspace.findMany({
         where: { name: { contains: query, mode: 'insensitive' } },
         take: 5,
@@ -168,12 +324,11 @@ export class ChatService {
     return results;
   }
 
-  // ── Send message (the main flow) ──────────────────────────
+  // ── Send message ──────────────────────────────────────────────
 
   async sendMessage(userId: string, dto: ChatRequestDto): Promise<ChatResponseDto> {
     const { message, conversationId, companyId, workspaceId, mentions } = dto;
 
-    // get or create conversation
     let convo: any;
     if (conversationId) {
       convo = await this.prisma.conversation.findFirst({
@@ -183,33 +338,28 @@ export class ChatService {
       if (!convo) throw new HttpException('Conversation not found', HttpStatus.NOT_FOUND);
     } else {
       convo = await this.prisma.conversation.create({
-        data: {
-          userId,
-          companyId: companyId || null,
-          workspaceId: workspaceId || null,
-        },
+        data: { userId, companyId: companyId || null, workspaceId: workspaceId || null },
         include: { messages: true },
       });
     }
 
-    // save user message
-    const userMsg = await this.prisma.message.create({
-      data: {
-        conversationId: convo.id,
-        role: 'user',
-        content: message,
-      },
+    await this.prisma.message.create({
+      data: { conversationId: convo.id, role: 'user', content: message },
     });
 
-    // build history from DB
-    const history: MessageDto[] = convo.messages.map((m: any) => ({
-      id: m.id,
+    const history: LlmMessage[] = convo.messages.map((m: any) => ({
       role: m.role,
       content: m.content,
     }));
 
     const effectiveCompanyId = companyId || convo.companyId;
     const effectiveWorkspaceId = workspaceId || convo.workspaceId;
+
+    const scope: ScopeConstraints = {
+      workspaceId: effectiveWorkspaceId,
+      companyId: effectiveCompanyId,
+      mentions,
+    };
 
     const usageCtx = {
       userId,
@@ -218,26 +368,17 @@ export class ChatService {
       conversationId: convo.id,
     };
 
-    // call 1: generate query
-    const queryJson = await this.generateQuery(message, effectiveCompanyId, effectiveWorkspaceId, history, mentions, usageCtx);
+    const agentResult = await this.runAgentLoop(message, history, scope, usageCtx);
 
-    // execute query — mentions override scope
-    const logs = await this.executePrismaQuery(queryJson, effectiveCompanyId, effectiveWorkspaceId, mentions);
-
-    // call 2: generate answer
-    const reply = await this.generateAnswer(message, logs, history, usageCtx);
-
-    // save assistant message
     const assistantMsg = await this.prisma.message.create({
       data: {
         conversationId: convo.id,
         role: 'assistant',
-        content: reply,
-        logsUsed: logs.length,
-      },
+        content: agentResult.content,
+        dataUsed: agentResult.dataUsed,
+      } as any,
     });
 
-    // auto-title on first message, then bump updatedAt
     let title: string | undefined;
     if (convo.messages.length === 0) {
       title = await this.generateTitle(message, convo.id, usageCtx);
@@ -254,244 +395,230 @@ export class ChatService {
       message: {
         id: assistantMsg.id,
         role: 'assistant',
-        content: reply,
-        logsUsed: logs.length,
+        content: agentResult.content,
+        dataUsed: agentResult.dataUsed,
         createdAt: assistantMsg.createdAt.toISOString(),
       },
-      logsUsed: logs.length,
+      dataUsed: agentResult.dataUsed,
     };
   }
 
-  // ── Title generation ────────────────────────────────────────
+  // ── Agentic loop ──────────────────────────────────────────────
 
-  private async generateTitle(firstMessage: string, conversationId: string, usageCtx?: any): Promise<string | undefined> {
-    try {
-      const result = await this.callLlm([
-        {
-          role: 'system',
-          content: 'Generate a short title (max 6 words) for a SOC chat conversation based on the user\'s first message. Return ONLY the title text, nothing else. No quotes.',
-        },
-        { role: 'user', content: firstMessage },
-      ]);
-      if (usageCtx) this.recordUsage(result, 'title', usageCtx);
-      const title = result.content.trim().replace(/^["']|["']$/g, '').slice(0, 80);
-      await this.prisma.conversation.update({
-        where: { id: conversationId },
-        data: { title },
-      });
-      return title;
-    } catch (err) {
-      this.logger.warn(`Failed to generate title: ${err}`);
-      return undefined;
-    }
-  }
+  private async runAgentLoop(
+    userMessage: string,
+    history: LlmMessage[],
+    scope: ScopeConstraints,
+    usageCtx: any,
+  ): Promise<AgentResult> {
+    const now = Math.floor(Date.now() / 1000);
+    const nowHuman = new Date().toLocaleString('en-GB', { timeZone: 'Europe/Athens', dateStyle: 'long', timeStyle: 'short' });
 
-  // ── LLM query generation ──────────────────────────────────
+    const scopeDesc = this.buildScopeDescription(scope);
 
-  private async generateQuery(
-    message: string,
-    companyId?: string | null,
-    workspaceId?: string | null,
-    history?: MessageDto[],
-    mentions?: ChatMention[],
-    usageCtx?: any,
-  ): Promise<any> {
-    const contextParts: string[] = [];
+    const systemPrompt = `You are Lurka, an AI analyst assistant for a SOC (Security Operations Center) platform.
+You have direct access to the platform database via tools. Always call tools to retrieve real data before answering — never guess or fabricate.
 
-    // mentions override normal scope
-    if (mentions?.length) {
-      const companyMentions = mentions.filter((m) => m.type === 'company');
-      const workspaceMentions = mentions.filter((m) => m.type === 'workspace');
-      if (workspaceMentions.length) {
-        const ids = workspaceMentions.map((m) => `"${m.id}"`).join(', ');
-        const names = workspaceMentions.map((m) => m.name).join(', ');
-        contextParts.push(`The user mentioned specific workspaces: ${names}. Filter by workspaceId IN [${ids}].`);
-      }
-      if (companyMentions.length) {
-        const ids = companyMentions.map((m) => `"${m.id}"`).join(', ');
-        const names = companyMentions.map((m) => m.name).join(', ');
-        contextParts.push(`The user mentioned specific companies: ${names}. Filter by workspace: { companyId: { in: [${ids}] } }.`);
-      }
-    } else if (workspaceId) {
-      contextParts.push(`The user is viewing workspace ID: "${workspaceId}"`);
-    } else if (companyId) {
-      contextParts.push(`The user is viewing company ID: "${companyId}". Query logs across ALL workspaces belonging to this company.`);
-    } else {
-      contextParts.push('No specific workspace/company selected. Query across all logs.');
-    }
+CURRENT CONTEXT:
+- Time: ${nowHuman} (Europe/Athens timezone, Unix: ${now})
+- Scope: ${scopeDesc}
 
-    const systemPrompt = `You are a database query assistant for a SOC (Security Operations Center) platform.
-Given a user's question about security logs, generate a Prisma "where" clause (as JSON) and optional ordering/limit to retrieve the relevant logs.
+TOOLS AVAILABLE:
+- search_logs: network/security log records (traffic, threats, events, IPs, protocols, countries)
+- get_alerts: security alerts by status, severity, assignee, time range
+- get_alert_detail: full alert with notes and activity timeline
+- get_companies: client companies list
+- get_workspaces: monitored environments
+- get_users: SOC team members and roles
+- get_analysis_rules: configured detection rules
+- get_usage_stats: AI/LLM cost and usage records
+- get_ip_reputation: AbuseIPDB cached reputation for a specific IP
 
-${LOG_SCHEMA}
-
-RULES:
-- Return ONLY valid JSON. No markdown, no explanation, no code fences, no text before or after.
-- The JSON must have this exact shape: { "where": {}, "orderBy": {}, "take": number }
-- "where" is a Prisma where clause for the Log model.
-- "orderBy" defaults to { "timestamp": "desc" } if not specified.
-- "take" is optional. Omit it to retrieve ALL matching logs. Only set it if the user explicitly asks for a specific number (e.g. "show me the last 50").
-- ${contextParts.join(' ')}
-- ${!mentions?.length && workspaceId ? `Always include workspaceId: "${workspaceId}" in the where clause.` : ''}
-- ${!mentions?.length && companyId && !workspaceId ? `To filter by company, use: workspace: { companyId: "${companyId}" }` : ''}
-- For time-based queries, "timestamp" is Unix epoch (seconds). Current time is approximately ${Math.floor(Date.now() / 1000)}.
-- When the user mentions dates/times, assume they are referring to Europe/Athens (Greece) timezone (UTC+2 / UTC+3 DST). Convert accordingly to Unix epoch.
-- Use Prisma operators: equals, not, in, notIn, lt, lte, gt, gte, contains (for string search), mode: "insensitive" for case-insensitive.
-- For "latest" or "recent" queries without a specific count, just use orderBy desc without a take limit.
-- For severity filtering, valid values are: unknown, low, medium, high, critical (lowercase).
-- For string matching on fields like eventType, vendor, action, application — use contains with mode: "insensitive" so casing doesn't matter.
-
-EXAMPLES:
-
-User: "show me denied traffic" (workspace scoped to "ws123")
-{"where":{"workspaceId":"ws123","action":"deny"},"orderBy":{"timestamp":"desc"}}
-
-User: "any critical alerts in @Acme Corp?" (company mention with id "comp1")
-{"where":{"severity":"critical","workspace":{"companyId":{"in":["comp1"]}}},"orderBy":{"timestamp":"desc"}}
-
-User: "show logs from last hour"  (workspace "ws456", current time ~1741800000)
-{"where":{"workspaceId":"ws456","timestamp":{"gte":1741796400}},"orderBy":{"timestamp":"desc"}}
-
-User: "what happened today" (no scope)
-{"where":{"timestamp":{"gte":${Math.floor(new Date().setHours(0, 0, 0, 0) / 1000)}}}, "orderBy":{"timestamp":"desc"}}`;
+GUIDELINES:
+- Call multiple tools in parallel when the question needs data from different sources.
+- For multi-hop questions (e.g. "which company had the most critical alerts?"), use earlier results to inform later tool calls.
+- When the user asks about a specific IP, always call get_ip_reputation alongside any log search.
+- Be concise and precise. No filler, no preamble. Reference specific data (IPs, counts, names, timestamps) in your answers.
+- Show all dates and times in Europe/Athens timezone in human-readable format (e.g. "March 10 at 14:35").
+- Use plain text. No markdown headers. Short paragraphs.
+- If no data matches, say so briefly and suggest what might help.
+- If something looks genuinely alarming, flag it even if not asked.`;
 
     const messages: LlmMessage[] = [
       { role: 'system', content: systemPrompt },
+      ...history.slice(-10),
+      { role: 'user', content: userMessage },
     ];
 
-    if (history?.length) {
-      for (const msg of history.slice(-6)) {
-        messages.push({ role: msg.role, content: msg.content });
+    let dataUsed = 0;
+    let totalPromptTokens = 0;
+    let totalCompletionTokens = 0;
+
+    for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
+      const { choice, usage } = await this.callLlmWithTools(messages);
+
+      totalPromptTokens += usage.prompt_tokens || 0;
+      totalCompletionTokens += usage.completion_tokens || 0;
+
+      if (choice.finish_reason === 'stop' || !choice.message.tool_calls?.length) {
+        // Final answer
+        const content = choice.message.content ?? '';
+        this.recordUsage(
+          { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens, totalTokens: totalPromptTokens + totalCompletionTokens },
+          'answer',
+          usageCtx,
+        );
+        return { content, dataUsed, usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens, totalTokens: totalPromptTokens + totalCompletionTokens } };
       }
+
+      // Execute all tool calls (parallel)
+      const assistantMsg: LlmMessage = {
+        role: 'assistant',
+        content: choice.message.content ?? null,
+        tool_calls: choice.message.tool_calls,
+      };
+      messages.push(assistantMsg);
+
+      const toolResults = await Promise.all(
+        choice.message.tool_calls.map(async (tc: any) => {
+          let args: any = {};
+          try { args = JSON.parse(tc.function.arguments); } catch { /* bad json from llm */ }
+
+          const { data, count } = await this.executeTool(tc.function.name, args, scope);
+          dataUsed += count;
+
+          return {
+            role: 'tool' as const,
+            tool_call_id: tc.id,
+            name: tc.function.name,
+            content: JSON.stringify(data),
+          };
+        }),
+      );
+
+      messages.push(...toolResults);
     }
 
-    messages.push({ role: 'user', content: message });
-
-    const result = await this.callLlm(messages);
-    if (usageCtx) this.recordUsage(result, 'query', usageCtx);
-
-    try {
-      // strip markdown fences, leading/trailing text around the JSON
-      let cleaned = result.content.replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
-      // extract the first JSON object if there's extra text
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      if (jsonMatch) cleaned = jsonMatch[0];
-      return JSON.parse(cleaned);
-    } catch {
-      this.logger.warn(`LLM returned unparseable query, falling back to default. Raw: ${result.content}`);
-      const fallback: any = { where: {}, orderBy: { timestamp: 'desc' } };
-      if (workspaceId) fallback.where.workspaceId = workspaceId;
-      if (companyId && !workspaceId) fallback.where.workspace = { companyId };
-      return fallback;
-    }
+    // Shouldn't reach here but just in case
+    return { content: 'I was unable to complete the analysis within the allowed number of steps. Please try a more specific question.', dataUsed, usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens, totalTokens: totalPromptTokens + totalCompletionTokens } };
   }
 
-  // ── Query execution ───────────────────────────────────────
+  // ── Scope helpers ─────────────────────────────────────────────
 
-  private async executePrismaQuery(queryJson: any, companyId?: string | null, workspaceId?: string | null, mentions?: ChatMention[]) {
-    const { where = {}, orderBy = { timestamp: 'desc' }, take } = queryJson;
-
+  private buildScopeDescription(scope: ScopeConstraints): string {
+    const { workspaceId, companyId, mentions } = scope;
     if (mentions?.length) {
-      // mentions override normal scoping
+      const parts = mentions.map((m) => `${m.type} "${m.name}" (${m.id})`).join(', ');
+      return `User mentioned: ${parts}. Queries are constrained to these entities.`;
+    }
+    if (workspaceId) return `Workspace scoped (ID: ${workspaceId})`;
+    if (companyId) return `Company scoped (ID: ${companyId})`;
+    return 'Global — all companies and workspaces';
+  }
+
+  // Injects scope constraints into a where clause for logs/alerts.
+  // Mention scope > page workspace > page company > global.
+  private injectLogScope(where: any, scope: ScopeConstraints): any {
+    const { workspaceId, companyId, mentions } = scope;
+    if (mentions?.length) {
       const wsIds = mentions.filter((m) => m.type === 'workspace').map((m) => m.id);
       const coIds = mentions.filter((m) => m.type === 'company').map((m) => m.id);
-      const conditions: any[] = [];
-      if (wsIds.length) conditions.push({ workspaceId: { in: wsIds } });
-      if (coIds.length) conditions.push({ workspace: { companyId: { in: coIds } } });
-      if (conditions.length === 1) {
-        Object.assign(where, conditions[0]);
-      } else if (conditions.length > 1) {
-        where.OR = conditions;
-      }
+      if (wsIds.length) where.workspaceId = { in: wsIds };
+      else if (coIds.length) where.workspace = { companyId: { in: coIds } };
     } else if (workspaceId) {
       where.workspaceId = workspaceId;
     } else if (companyId) {
-      where.workspace = { ...where.workspace, companyId };
+      where.workspace = { ...(where.workspace ?? {}), companyId };
     }
+    return where;
+  }
 
-    const queryOptions: any = { where, orderBy };
-    if (take !== undefined && take !== null) {
-      queryOptions.take = Math.max(take, 1);
+  private injectAlertScope(where: any, args: any, scope: ScopeConstraints): any {
+    const { workspaceId, companyId, mentions } = scope;
+    if (mentions?.length) {
+      const wsIds = mentions.filter((m) => m.type === 'workspace').map((m) => m.id);
+      const coIds = mentions.filter((m) => m.type === 'company').map((m) => m.id);
+      if (wsIds.length) where.workspaceId = { in: wsIds };
+      else if (coIds.length) where.workspace = { companyId: { in: coIds } };
+    } else if (workspaceId) {
+      where.workspaceId = workspaceId;
+    } else if (companyId) {
+      where.workspace = { companyId };
+    } else {
+      // global — trust the LLM's args
+      if (args.workspaceId) where.workspaceId = args.workspaceId;
+      if (args.companyId) where.workspace = { companyId: args.companyId };
     }
+    return where;
+  }
 
+  // ── Tool executor ─────────────────────────────────────────────
+
+  private async executeTool(name: string, args: any, scope: ScopeConstraints): Promise<{ data: any; count: number }> {
     try {
-      return await this.prisma.log.findMany(queryOptions);
-    } catch (err) {
-      this.logger.error(`Prisma query failed: ${err}. Query: ${JSON.stringify(queryJson)}`);
-      const fallbackWhere: any = {};
-
-      // apply mention scoping even in fallback
-      if (mentions?.length) {
-        const wsIds = mentions.filter((m) => m.type === 'workspace').map((m) => m.id);
-        const coIds = mentions.filter((m) => m.type === 'company').map((m) => m.id);
-        const conditions: any[] = [];
-        if (wsIds.length) conditions.push({ workspaceId: { in: wsIds } });
-        if (coIds.length) conditions.push({ workspace: { companyId: { in: coIds } } });
-        if (conditions.length === 1) Object.assign(fallbackWhere, conditions[0]);
-        else if (conditions.length > 1) fallbackWhere.OR = conditions;
-      } else if (workspaceId) {
-        fallbackWhere.workspaceId = workspaceId;
-      } else if (companyId) {
-        fallbackWhere.workspace = { companyId };
+      switch (name) {
+        case 'search_logs': return await this.toolSearchLogs(args, scope);
+        case 'get_alerts': return await this.toolGetAlerts(args, scope);
+        case 'get_alert_detail': return await this.toolGetAlertDetail(args);
+        case 'get_companies': return await this.toolGetCompanies(args);
+        case 'get_workspaces': return await this.toolGetWorkspaces(args);
+        case 'get_users': return await this.toolGetUsers(args);
+        case 'get_analysis_rules': return await this.toolGetAnalysisRules(args);
+        case 'get_usage_stats': return await this.toolGetUsageStats(args);
+        case 'get_ip_reputation': return await this.toolGetIpReputation(args);
+        default:
+          this.logger.warn(`Unknown tool: ${name}`);
+          return { data: { error: `Unknown tool: ${name}` }, count: 0 };
       }
-
-      return this.prisma.log.findMany({
-        where: fallbackWhere,
-        orderBy: { timestamp: 'desc' },
-        take: 200,
-      });
+    } catch (err) {
+      this.logger.error(`Tool ${name} failed: ${err}`);
+      return { data: { error: String(err) }, count: 0 };
     }
   }
 
-  // ── Log context builder ───────────────────────────────────
+  private async toolSearchLogs(args: any, scope: ScopeConstraints) {
+    const { where = {}, orderBy = { timestamp: 'desc' }, take } = args;
+    this.injectLogScope(where, scope);
 
-  private buildLogContext(logs: any[]): string {
+    const logs = await this.prisma.log.findMany({
+      where,
+      orderBy,
+      ...(take ? { take: Math.min(take, 2000) } : { take: 500 }),
+      select: {
+        id: true, timestamp: true, severity: true, vendor: true, eventType: true,
+        action: true, application: true, protocol: true, policy: true,
+        sourceIp: true, sourcePort: true, destinationIp: true, destinationPort: true,
+        srcCountry: true, dstCountry: true, rawLog: true,
+        workspace: { select: { id: true, name: true, company: { select: { id: true, name: true } } } },
+      },
+    });
+
+    // Aggregate summary + sample to keep response size manageable
     const total = logs.length;
-    if (total === 0) return 'No logs matched the query.';
-
     const bySeverity: Record<string, number> = {};
-    const byEventType: Record<string, number> = {};
     const byAction: Record<string, number> = {};
     const byVendor: Record<string, number> = {};
-    const byProtocol: Record<string, number> = {};
-    const srcIpCounts: Record<string, number> = {};
-    const dstIpCounts: Record<string, number> = {};
-    let minTs = Infinity;
-    let maxTs = -Infinity;
+    const byCountry: Record<string, number> = {};
+    const srcIps: Record<string, number> = {};
+    const dstIps: Record<string, number> = {};
+    let minTs = Infinity, maxTs = -Infinity;
 
     for (const l of logs) {
       bySeverity[l.severity] = (bySeverity[l.severity] || 0) + 1;
-      byEventType[l.eventType] = (byEventType[l.eventType] || 0) + 1;
       if (l.action) byAction[l.action] = (byAction[l.action] || 0) + 1;
       byVendor[l.vendor] = (byVendor[l.vendor] || 0) + 1;
-      if (l.protocol) byProtocol[l.protocol] = (byProtocol[l.protocol] || 0) + 1;
-      if (l.sourceIp) srcIpCounts[l.sourceIp] = (srcIpCounts[l.sourceIp] || 0) + 1;
-      if (l.destinationIp) dstIpCounts[l.destinationIp] = (dstIpCounts[l.destinationIp] || 0) + 1;
+      if (l.srcCountry) byCountry[l.srcCountry] = (byCountry[l.srcCountry] || 0) + 1;
+      if (l.sourceIp) srcIps[l.sourceIp] = (srcIps[l.sourceIp] || 0) + 1;
+      if (l.destinationIp) dstIps[l.destinationIp] = (dstIps[l.destinationIp] || 0) + 1;
       if (l.timestamp < minTs) minTs = l.timestamp;
       if (l.timestamp > maxTs) maxTs = l.timestamp;
     }
 
     const topN = (map: Record<string, number>, n: number) =>
-      Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, n)
-        .map(([k, v]) => `${k}: ${v}`).join(', ');
+      Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, v]) => ({ value: k, count: v }));
 
-    const parts = [
-      `Total logs retrieved: ${total}`,
-      `Time range: ${new Date(minTs * 1000).toISOString()} to ${new Date(maxTs * 1000).toISOString()}`,
-      `Severity breakdown: ${topN(bySeverity, 10)}`,
-      `Event types: ${topN(byEventType, 10)}`,
-      `Actions: ${topN(byAction, 10)}`,
-      `Vendors: ${topN(byVendor, 10)}`,
-      Object.keys(byProtocol).length > 0 ? `Protocols: ${topN(byProtocol, 10)}` : null,
-      `Top source IPs: ${topN(srcIpCounts, 15)}`,
-      `Top destination IPs: ${topN(dstIpCounts, 15)}`,
-    ].filter(Boolean);
-
-    const sampleLogs = total <= 50
-      ? logs
-      : [...logs.slice(0, 30), ...logs.slice(-10)];
-
-    const sample = sampleLogs.map((l) => ({
+    const sample = logs.slice(0, 60).map((l) => ({
+      id: l.id,
       time: new Date(l.timestamp * 1000).toISOString(),
       severity: l.severity,
       vendor: l.vendor,
@@ -499,85 +626,377 @@ User: "what happened today" (no scope)
       action: l.action,
       app: l.application,
       proto: l.protocol,
-      src: l.sourceIp ? `${l.sourceIp}:${l.sourcePort || ''}` : null,
-      dst: l.destinationIp ? `${l.destinationIp}:${l.destinationPort || ''}` : null,
-      policy: l.policy,
+      src: l.sourceIp ? `${l.sourceIp}:${l.sourcePort ?? ''}` : null,
+      dst: l.destinationIp ? `${l.destinationIp}:${l.destinationPort ?? ''}` : null,
+      srcCountry: l.srcCountry,
+      dstCountry: l.dstCountry,
+      workspace: (l as any).workspace?.name,
+      company: (l as any).workspace?.company?.name,
     }));
 
-    parts.push(`\nSample logs (${sampleLogs.length} of ${total}):\n${JSON.stringify(sample, null, 1)}`);
-
-    return parts.join('\n');
+    return {
+      data: {
+        total,
+        timeRange: total > 0 ? { from: new Date(minTs * 1000).toISOString(), to: new Date(maxTs * 1000).toISOString() } : null,
+        bySeverity: topN(bySeverity, 10),
+        byAction: topN(byAction, 10),
+        byVendor: topN(byVendor, 10),
+        topSourceCountries: topN(byCountry, 15),
+        topSourceIps: topN(srcIps, 15),
+        topDestinationIps: topN(dstIps, 15),
+        sample,
+      },
+      count: total,
+    };
   }
 
-  // ── Answer generation ─────────────────────────────────────
+  private async toolGetAlerts(args: any, scope: ScopeConstraints) {
+    const { status, severity, assigneeId, unassigned, from, to, take = 50 } = args;
+    const where: any = {};
 
-  private async generateAnswer(message: string, logs: any[], history?: MessageDto[], usageCtx?: any): Promise<string> {
-    const logContext = this.buildLogContext(logs);
+    this.injectAlertScope(where, args, scope);
 
-    // fetch admin-defined analysis rules
-    const analysisRules = await this.prisma.analysisRule.findMany({
-      where: { enabled: true },
-      orderBy: { createdAt: 'asc' },
+    if (status) where.status = status;
+    if (severity) where.severity = severity;
+    if (assigneeId) where.assigneeId = assigneeId;
+    if (unassigned) where.assigneeId = null;
+    if (from || to) {
+      where.createdAt = {};
+      if (from) where.createdAt.gte = new Date(from * 1000);
+      if (to) where.createdAt.lte = new Date(to * 1000);
+    }
+
+    const alerts = await this.prisma.alert.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: Math.min(take, 200),
+      include: {
+        workspace: { select: { id: true, name: true, company: { select: { id: true, name: true } } } },
+        assignee: { select: { id: true, name: true, email: true } },
+        _count: { select: { notes: true, activities: true } },
+      },
     });
 
-    let rulesSection = '';
-    if (analysisRules.length > 0) {
-      const ruleLines = analysisRules.map((r: any) => `- [${r.category}] ${r.content}`).join('\n');
-      rulesSection = `\n\nANALYSIS GUIDELINES (defined by the SOC team — use these as additional context when evaluating logs, but apply your own judgment too):\n${ruleLines}`;
+    // Status/severity summary
+    const byStatus: Record<string, number> = {};
+    const bySeverity: Record<string, number> = {};
+    for (const a of alerts) {
+      byStatus[a.status] = (byStatus[a.status] || 0) + 1;
+      bySeverity[a.severity] = (bySeverity[a.severity] || 0) + 1;
     }
 
-    const systemPrompt = `You are Lurka, a SOC (Security Operations Center) AI analyst assistant.
-You help security analysts investigate logs, identify threats, and understand network activity.
-
-RULES:
-- Answer ONLY the user's question directly. Do not volunteer extra information, statistics, or analysis they didn't ask for.
-- The only exception: if you spot something genuinely critical or alarming in the data (e.g. active breach, suspicious exfiltration pattern), briefly mention it.
-- Be concise and professional. No fluff, no filler, no "here's a summary" preambles.
-- Reference specific data from the logs (IPs, timestamps, counts, patterns) when relevant to the question.
-- When presenting timestamps or dates to the user, always show them in Europe/Athens (Greece) timezone in a natural human-readable format (e.g. "March 10 at 14:35", "yesterday at 09:12", "last Tuesday"). Never show raw Unix timestamps or UTC ISO strings.
-- If the logs show something suspicious and the user asked about it, highlight it clearly.
-- If the logs look normal, say so briefly. Don't invent threats.
-- Use plain text. No markdown headers. Keep paragraphs short.
-- When mentioning counts, be precise based on the data provided.
-- You have aggregated stats and a sample of the ${logs.length} logs retrieved. Use both to answer.
-${logs.length === 0 ? '- No logs matched the query. Let the user know and suggest refining their question.' : ''}${rulesSection}`;
-
-    const messages: LlmMessage[] = [
-      { role: 'system', content: systemPrompt },
-    ];
-
-    if (history?.length) {
-      for (const msg of history.slice(-6)) {
-        messages.push({ role: msg.role, content: msg.content });
-      }
-    }
-
-    const userContent = logs.length > 0
-      ? `${message}\n\n--- LOG DATA ---\n${logContext}`
-      : message;
-
-    messages.push({ role: 'user', content: userContent });
-
-    const result = await this.callLlm(messages);
-    if (usageCtx) this.recordUsage(result, 'answer', usageCtx);
-    return result.content;
+    return {
+      data: {
+        total: alerts.length,
+        byStatus,
+        bySeverity,
+        alerts: alerts.map((a) => ({
+          id: a.id,
+          title: a.title,
+          description: a.description,
+          severity: a.severity,
+          status: a.status,
+          sourceIp: a.sourceIp,
+          destinationIp: a.destinationIp,
+          logCount: a.logCount,
+          createdAt: a.createdAt.toISOString(),
+          updatedAt: a.updatedAt.toISOString(),
+          workspace: (a as any).workspace?.name,
+          company: (a as any).workspace?.company?.name,
+          assignee: (a as any).assignee?.name ?? null,
+          notesCount: (a as any)._count?.notes ?? 0,
+        })),
+      },
+      count: alerts.length,
+    };
   }
 
-  // ── LLM caller ────────────────────────────────────────────
+  private async toolGetAlertDetail(args: any) {
+    const { alertId } = args;
+    const alert = await this.prisma.alert.findUnique({
+      where: { id: alertId },
+      include: {
+        workspace: { select: { name: true, company: { select: { name: true } } } },
+        assignee: { select: { name: true, email: true, role: true } },
+        notes: {
+          orderBy: { createdAt: 'asc' },
+          include: { user: { select: { name: true } } },
+        },
+        activities: {
+          orderBy: { createdAt: 'asc' },
+          include: { user: { select: { name: true } } },
+        },
+      },
+    });
 
-  private async callLlm(messages: LlmMessage[]): Promise<LlmResult> {
+    if (!alert) return { data: { error: `Alert ${alertId} not found` }, count: 0 };
+
+    return {
+      data: {
+        id: alert.id,
+        title: alert.title,
+        description: alert.description,
+        severity: alert.severity,
+        status: alert.status,
+        sourceIp: alert.sourceIp,
+        destinationIp: alert.destinationIp,
+        logCount: alert.logCount,
+        createdAt: alert.createdAt.toISOString(),
+        updatedAt: alert.updatedAt.toISOString(),
+        workspace: (alert as any).workspace?.name,
+        company: (alert as any).workspace?.company?.name,
+        assignee: (alert as any).assignee ? { name: (alert as any).assignee.name, email: (alert as any).assignee.email, role: (alert as any).assignee.role } : null,
+        notes: (alert as any).notes.map((n: any) => ({ author: n.user.name, content: n.content, createdAt: n.createdAt.toISOString() })),
+        timeline: (alert as any).activities.map((a: any) => ({ actor: a.user.name, action: a.action, detail: a.detail, createdAt: a.createdAt.toISOString() })),
+      },
+      count: 1,
+    };
+  }
+
+  private async toolGetCompanies(args: any) {
+    const where: any = {};
+    if (args.search) where.name = { contains: args.search, mode: 'insensitive' };
+
+    const companies = await this.prisma.company.findMany({
+      where,
+      orderBy: { name: 'asc' },
+      include: {
+        _count: { select: { workspaces: true } },
+      },
+    });
+
+    return {
+      data: companies.map((c) => ({
+        id: c.id,
+        name: c.name,
+        contact: c.contact,
+        workspaceCount: (c as any)._count.workspaces,
+        createdAt: c.createdAt.toISOString(),
+      })),
+      count: companies.length,
+    };
+  }
+
+  private async toolGetWorkspaces(args: any) {
+    const where: any = {};
+    if (args.companyId) where.companyId = args.companyId;
+    if (args.search) where.name = { contains: args.search, mode: 'insensitive' };
+
+    const workspaces = await this.prisma.workspace.findMany({
+      where,
+      orderBy: { name: 'asc' },
+      include: {
+        company: { select: { id: true, name: true } },
+        _count: { select: { logs: true, alerts: true } },
+      },
+    });
+
+    return {
+      data: workspaces.map((w) => ({
+        id: w.id,
+        name: w.name,
+        description: w.description,
+        autoResponseEnabled: w.autoResponseEnabled,
+        company: (w as any).company.name,
+        companyId: (w as any).company.id,
+        logCount: (w as any)._count.logs,
+        alertCount: (w as any)._count.alerts,
+        createdAt: w.createdAt.toISOString(),
+      })),
+      count: workspaces.length,
+    };
+  }
+
+  private async toolGetUsers(args: any) {
+    const where: any = {};
+    if (args.role) where.role = args.role;
+
+    const users = await this.prisma.user.findMany({
+      where,
+      orderBy: { name: 'asc' },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        createdAt: true,
+        _count: { select: { assignedAlerts: true, conversations: true } },
+      },
+    });
+
+    return {
+      data: users.map((u) => ({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        assignedAlerts: (u as any)._count.assignedAlerts,
+        conversations: (u as any)._count.conversations,
+        joinedAt: u.createdAt.toISOString(),
+      })),
+      count: users.length,
+    };
+  }
+
+  private async toolGetAnalysisRules(args: any) {
+    const where: any = {};
+    if (args.enabled !== undefined) where.enabled = args.enabled;
+    if (args.category) where.category = args.category;
+
+    const rules = await this.prisma.analysisRule.findMany({
+      where,
+      orderBy: { createdAt: 'asc' },
+      include: { createdBy: { select: { name: true } } },
+    });
+
+    return {
+      data: rules.map((r) => ({
+        id: r.id,
+        title: r.title,
+        content: r.content,
+        category: r.category,
+        enabled: r.enabled,
+        createdBy: (r as any).createdBy.name,
+        createdAt: r.createdAt.toISOString(),
+      })),
+      count: rules.length,
+    };
+  }
+
+  private async toolGetUsageStats(args: any) {
+    const { from, to, companyId, userId, purpose, take = 100 } = args;
+    const where: any = {};
+    if (from || to) {
+      where.createdAt = {};
+      if (from) where.createdAt.gte = new Date(from * 1000);
+      if (to) where.createdAt.lte = new Date(to * 1000);
+    }
+    if (companyId) where.companyId = companyId;
+    if (userId) where.userId = userId;
+    if (purpose) where.purpose = purpose;
+
+    const records = await this.prisma.llmUsage.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: Math.min(take, 500),
+      include: {
+        user: { select: { name: true } },
+        company: { select: { name: true } },
+      },
+    });
+
+    // Aggregate totals
+    const totals = records.reduce(
+      (acc, r) => {
+        acc.totalCostUsd += r.costUsd;
+        acc.totalTokens += r.totalTokens;
+        acc.totalCalls += 1;
+        return acc;
+      },
+      { totalCostUsd: 0, totalTokens: 0, totalCalls: 0 },
+    );
+
+    const byPurpose: Record<string, { calls: number; costUsd: number; tokens: number }> = {};
+    const byModel: Record<string, { calls: number; costUsd: number }> = {};
+    for (const r of records) {
+      if (!byPurpose[r.purpose]) byPurpose[r.purpose] = { calls: 0, costUsd: 0, tokens: 0 };
+      byPurpose[r.purpose].calls++;
+      byPurpose[r.purpose].costUsd += r.costUsd;
+      byPurpose[r.purpose].tokens += r.totalTokens;
+      if (!byModel[r.model]) byModel[r.model] = { calls: 0, costUsd: 0 };
+      byModel[r.model].calls++;
+      byModel[r.model].costUsd += r.costUsd;
+    }
+
+    return {
+      data: {
+        totals: { ...totals, totalCostUsd: Math.round(totals.totalCostUsd * 10000) / 10000 },
+        byPurpose,
+        byModel,
+        recent: records.slice(0, 20).map((r) => ({
+          model: r.model,
+          purpose: r.purpose,
+          costUsd: r.costUsd,
+          totalTokens: r.totalTokens,
+          user: (r as any).user?.name ?? null,
+          company: (r as any).company?.name ?? null,
+          createdAt: r.createdAt.toISOString(),
+        })),
+      },
+      count: records.length,
+    };
+  }
+
+  private async toolGetIpReputation(args: any) {
+    const { ip } = args;
+    const rep = await this.prisma.ipReputation.findUnique({ where: { ip } });
+
+    if (!rep) {
+      return { data: { ip, found: false, message: 'No reputation data cached for this IP. The reputation service may not have checked it yet.' }, count: 0 };
+    }
+
+    return {
+      data: {
+        ip: rep.ip,
+        found: true,
+        abuseScore: rep.abuseScore,
+        countryCode: rep.countryCode,
+        isp: rep.isp,
+        domain: rep.domain,
+        usageType: rep.usageType,
+        totalReports: rep.totalReports,
+        lastReportedAt: rep.lastReportedAt?.toISOString() ?? null,
+        isPublic: rep.isPublic,
+        isWhitelisted: rep.isWhitelisted,
+        checkedAt: rep.checkedAt.toISOString(),
+      },
+      count: 1,
+    };
+  }
+
+  // ── Title generation ──────────────────────────────────────────
+
+  private async generateTitle(firstMessage: string, conversationId: string, usageCtx?: any): Promise<string | undefined> {
+    try {
+      const result = await this.callLlmSimple([
+        { role: 'system', content: 'Generate a short title (max 6 words) for a SOC chat conversation based on the user\'s first message. Return ONLY the title text, nothing else. No quotes.' },
+        { role: 'user', content: firstMessage },
+      ]);
+      if (usageCtx) this.recordUsage(result, 'title', usageCtx);
+      const title = result.content.trim().replace(/^["']|["']$/g, '').slice(0, 80);
+      await this.prisma.conversation.update({ where: { id: conversationId }, data: { title } });
+      return title;
+    } catch (err) {
+      this.logger.warn(`Failed to generate title: ${err}`);
+      return undefined;
+    }
+  }
+
+  // ── LLM callers ───────────────────────────────────────────────
+
+  private async callLlmWithTools(messages: LlmMessage[]): Promise<{ choice: any; usage: any }> {
     const { baseUrl, model, apiKey } = getOpenAiConfig();
     const res = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: 0.2,
-      }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, messages, tools: TOOLS, tool_choice: 'auto', temperature: 0.2 }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`LLM API error ${res.status}: ${text}`);
+    }
+
+    const data = await res.json();
+    return { choice: data.choices?.[0], usage: data.usage || {} };
+  }
+
+  private async callLlmSimple(messages: { role: string; content: string }[]): Promise<{ content: string; promptTokens: number; completionTokens: number; totalTokens: number }> {
+    const { baseUrl, model, apiKey } = getOpenAiConfig();
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, messages, temperature: 0.2 }),
     });
 
     if (!res.ok) {
@@ -588,15 +1007,17 @@ ${logs.length === 0 ? '- No logs matched the query. Let the user know and sugges
     const data = await res.json();
     const usage = data.usage || {};
     return {
-      content: data.choices?.[0]?.message?.content || 'No response from model.',
+      content: data.choices?.[0]?.message?.content || '',
       promptTokens: usage.prompt_tokens || 0,
       completionTokens: usage.completion_tokens || 0,
       totalTokens: usage.total_tokens || 0,
     };
   }
 
+  // ── Usage recording ───────────────────────────────────────────
+
   private async recordUsage(
-    result: LlmResult,
+    result: { promptTokens: number; completionTokens: number; totalTokens: number },
     purpose: string,
     ctx: { userId?: string; companyId?: string | null; workspaceId?: string | null; conversationId?: string },
   ) {

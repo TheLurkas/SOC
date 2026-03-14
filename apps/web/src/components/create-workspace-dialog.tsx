@@ -55,7 +55,7 @@ export function CreateWorkspaceDialog({ companyId, onCreated }: CreateWorkspaceD
         render={
           <Button size="sm" className="h-8 text-xs gap-1.5">
             <Plus className="size-3.5" />
-            New Workspace
+            New
           </Button>
         }
       />

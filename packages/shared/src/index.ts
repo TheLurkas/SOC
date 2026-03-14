@@ -327,7 +327,7 @@ export interface MessageDto {
   id: string;
   role: 'user' | 'assistant';
   content: string;
-  logsUsed?: number | null;
+  dataUsed?: number | null;
   createdAt?: string;
 }
 
@@ -362,7 +362,7 @@ export interface ChatResponseDto {
   conversationId: string;
   title?: string;
   message: MessageDto;
-  logsUsed: number;
+  dataUsed: number;
 }
 
 export interface MentionSuggestionDto {

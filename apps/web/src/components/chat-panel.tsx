@@ -477,7 +477,7 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {messages.length === 0 && !isThinking && (
             <div className="flex items-center justify-center h-full">
-              <p className="text-sm text-muted-foreground">Ask me about your logs — use @ to mention companies or workspaces</p>
+              <p className="text-sm text-muted-foreground">Ask me anything — logs, alerts, companies, users, rules, costs. Use @ to scope to a company or workspace.</p>
             </div>
           )}
           {messages.map((msg) => (
@@ -555,7 +555,7 @@ export function ChatPanel({ open, onClose, width, onResizeStart }: ChatPanelProp
             <div className="relative flex-1 min-w-0">
               <textarea
                 ref={inputRef}
-                placeholder="Ask about logs... type @ to mention"
+                placeholder="Ask anything... type @ to scope"
                 value={input}
                 onChange={(e) => {
                   handleInputChange(e.target.value);

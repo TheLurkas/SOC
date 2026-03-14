@@ -257,7 +257,7 @@ model Message {
   conversationId String
   role           String   // user | assistant
   content        String
-  logsUsed       Int?     // how many logs the assistant used to answer
+  dataUsed       Int?     // total records fetched across all tool calls
   createdAt      DateTime @default(now())
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
