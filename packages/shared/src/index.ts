@@ -97,6 +97,7 @@ export interface WorkspaceDto {
   deviceHost: string | null;
   devicePort: number | null;
   deviceUser: string | null;
+  deviceDescription: string | null;
   createdAt: string;
 }
 
@@ -114,6 +115,8 @@ export interface UpdateDeviceConfigDto {
   devicePort?: number | null;
   deviceUser?: string | null;
   devicePassword?: string | null;
+  deviceDescription?: string | null;
+  autoResponseEnabled?: boolean;
 }
 
 // ── Log DTOs ─────────────────────────────────────────────────

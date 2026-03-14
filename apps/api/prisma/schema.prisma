@@ -104,11 +104,12 @@ model Workspace {
   companyId           String
   name                String
   description         String?
-  autoResponseEnabled Boolean  @default(false)
-  deviceHost          String?
-  devicePort          Int?     @default(22)
-  deviceUser          String?
-  devicePassword      String?
+  autoResponseEnabled  Boolean  @default(false)
+  deviceHost           String?
+  devicePort           Int?     @default(22)
+  deviceUser           String?
+  devicePassword       String?
+  deviceDescription    String?  // e.g. "FortiGate 60F running FortiOS 7.4"
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 

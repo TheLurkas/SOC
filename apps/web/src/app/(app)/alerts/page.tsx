@@ -96,6 +96,7 @@ export default function AlertsPage() {
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [editingNoteText, setEditingNoteText] = useState("");
   const [autoResponse, setAutoResponse] = useState<AutoResponseDto | null>(null);
+  const [expandedCmds, setExpandedCmds] = useState<Set<string>>(new Set());
 
   // alert filters
   const [viewTab, setViewTab] = useState<ViewTab>(isAdmin ? "unassigned" : "mine");
@@ -221,6 +222,7 @@ export default function AlertsPage() {
       setNotes([]);
       setNoteText("");
       setAutoResponse(null);
+      setExpandedCmds(new Set());
       fetchNotes(selectedAlert.id);
       fetchAutoResponse(selectedAlert.id);
     }
@@ -674,10 +676,10 @@ export default function AlertsPage() {
 
       {/* alert detail dialog */}
       <Dialog open={!!selectedAlert} onOpenChange={(open) => { if (!open) setSelectedAlert(null); }}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-lg max-h-[85vh] flex flex-col">
           {selectedAlert && (
             <>
-              <DialogHeader>
+              <DialogHeader className="shrink-0">
                 <div className="flex items-center gap-2 mb-1">
                   <Badge variant="outline" className={severityColors[selectedAlert.severity] || ""}>
                     {selectedAlert.severity}
@@ -689,7 +691,7 @@ export default function AlertsPage() {
                 <DialogTitle className="text-base">{selectedAlert.title}</DialogTitle>
               </DialogHeader>
 
-              <div className="space-y-4 text-sm">
+              <div className="space-y-4 text-sm overflow-y-auto flex-1 min-h-0 pr-3">
                 <p className="text-muted-foreground">{selectedAlert.description}</p>
 
                 <div className="grid grid-cols-2 gap-3 text-xs">
@@ -910,40 +912,80 @@ export default function AlertsPage() {
                       </span>
                     </div>
 
-                    {autoResponse.status === "recommended" && (
-                      <p className="text-[11px] text-muted-foreground mb-3 bg-yellow-400/5 border border-yellow-400/20 rounded px-2 py-1.5">
-                        Auto-execute is disabled for this workspace. Enable it in workspace settings to run these automatically.
-                      </p>
+                    {autoResponse.status === "recommended" ? (
+                      <div className="mb-3 bg-yellow-400/5 border border-yellow-400/20 rounded px-3 py-2">
+                        <p className="text-[11px] text-yellow-400 font-medium">Not executed — recommendations only</p>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">
+                          Auto-execute is disabled for this workspace. These commands were not run on the device.
+                        </p>
+                      </div>
+                    ) : autoResponse.status === "completed" ? (
+                      <div className="mb-3 bg-emerald-500/10 border border-emerald-500/30 rounded px-3 py-2">
+                        <p className="text-[11px] text-emerald-400 font-medium">Commands executed successfully on device</p>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">
+                          All commands below were run via SSH on the target device. Verify changes are in effect.
+                        </p>
+                      </div>
+                    ) : autoResponse.status === "failed" ? (
+                      <div className="mb-3 bg-red-500/10 border border-red-500/30 rounded px-3 py-2">
+                        <p className="text-[11px] text-red-400 font-medium">Execution failed — manual intervention required</p>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">
+                          One or more commands failed after retries. Check command output below and apply manually if needed.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="mb-3 bg-blue-500/10 border border-blue-500/30 rounded px-3 py-2 animate-pulse">
+                        <p className="text-[11px] text-blue-400 font-medium">Executing commands on device...</p>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">
+                          Commands are being run via SSH on the target device right now. Do not make manual changes until complete.
+                        </p>
+                      </div>
                     )}
 
                     <p className="text-xs text-muted-foreground mb-3 italic">{autoResponse.reasoning}</p>
 
-                    <div className="space-y-2">
-                      {autoResponse.commands.map((cmd) => (
-                        <div key={cmd.id} className="bg-secondary/20 rounded-md p-2.5 space-y-1.5">
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
-                              {cmd.type.replace(/_/g, " ")}
-                            </span>
-                            <span className="text-[10px] font-mono text-foreground/70">{cmd.target}</span>
-                            <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded font-medium ${arStatusColors[cmd.status] || ""}`}>
-                              {cmd.status}
-                            </span>
-                            {cmd.retryCount > 0 && (
-                              <span className="text-[10px] text-muted-foreground">{cmd.retryCount} retries</span>
+                    <div className="space-y-1.5">
+                      {autoResponse.commands.map((cmd) => {
+                        const isOpen = expandedCmds.has(cmd.id);
+                        return (
+                          <div key={cmd.id} className="bg-secondary/20 rounded-md overflow-hidden">
+                            <button
+                              className="flex items-center gap-2 w-full px-2.5 py-2 text-left hover:bg-secondary/30 transition-colors"
+                              onClick={() => setExpandedCmds((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(cmd.id)) next.delete(cmd.id);
+                                else next.add(cmd.id);
+                                return next;
+                              })}
+                            >
+                              <ChevronRight className={`size-3 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`} />
+                              <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+                                {cmd.type.replace(/_/g, " ")}
+                              </span>
+                              <span className="text-[10px] font-mono text-foreground/70 truncate">{cmd.target}</span>
+                              <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${arStatusColors[cmd.status] || ""}`}>
+                                {cmd.status}
+                              </span>
+                              {cmd.retryCount > 0 && (
+                                <span className="text-[10px] text-muted-foreground shrink-0">{cmd.retryCount} retries</span>
+                              )}
+                            </button>
+                            {isOpen && (
+                              <div className="px-2.5 pb-2.5 space-y-1.5">
+                                <pre className="text-[10px] font-mono bg-black/20 rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap text-muted-foreground">
+                                  {cmd.command}
+                                </pre>
+                                {cmd.output && (
+                                  <pre className={`text-[10px] font-mono rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap ${cmd.status === "success" ? "bg-emerald-500/5 text-emerald-400/80" : "bg-red-500/5 text-red-400/80"}`}>
+                                    {cmd.output}
+                                  </pre>
+                                )}
+                                <p className="text-[10px] text-muted-foreground/60">{cmd.reasoning}</p>
+                              </div>
                             )}
                           </div>
-                          <pre className="text-[10px] font-mono bg-black/20 rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap text-muted-foreground">
-                            {cmd.command}
-                          </pre>
-                          {cmd.output && (
-                            <pre className={`text-[10px] font-mono rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap ${cmd.status === "success" ? "bg-emerald-500/5 text-emerald-400/80" : "bg-red-500/5 text-red-400/80"}`}>
-                              {cmd.output}
-                            </pre>
-                          )}
-                          <p className="text-[10px] text-muted-foreground/60">{cmd.reasoning}</p>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 )}

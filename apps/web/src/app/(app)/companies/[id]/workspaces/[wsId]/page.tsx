@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { authClient } from "@/lib/auth-client";
 import {
   ChartContainer,
@@ -121,6 +122,8 @@ export default function WorkspacePage({
   const [devicePort, setDevicePort] = useState("22");
   const [deviceUser, setDeviceUser] = useState("");
   const [devicePassword, setDevicePassword] = useState("");
+  const [deviceDescription, setDeviceDescription] = useState("");
+  const [autoResponseEnabled, setAutoResponseEnabled] = useState(false);
   const [deviceSaving, setDeviceSaving] = useState(false);
 
   const TIME_RANGES = [
@@ -145,6 +148,8 @@ export default function WorkspacePage({
         setDeviceHost(ws.deviceHost || "");
         setDevicePort(String(ws.devicePort || 22));
         setDeviceUser(ws.deviceUser || "");
+        setDeviceDescription(ws.deviceDescription || "");
+        setAutoResponseEnabled(ws.autoResponseEnabled);
       })
       .catch(() => {});
     refreshStats();
@@ -158,9 +163,12 @@ export default function WorkspacePage({
         devicePort: devicePort ? parseInt(devicePort) : null,
         deviceUser: deviceUser || null,
         devicePassword: devicePassword || null,
+        deviceDescription: deviceDescription || null,
+        autoResponseEnabled,
       });
       toast.success("Device config saved");
       setDevicePassword("");
+      if (workspace) setWorkspace({ ...workspace, autoResponseEnabled, deviceHost, devicePort: devicePort ? parseInt(devicePort) : null, deviceUser, deviceDescription });
     } catch {
       // interceptor handles
     } finally {
@@ -602,6 +610,10 @@ export default function WorkspacePage({
             <CardTitle className="text-sm font-medium flex items-center gap-2">
               <Server className="size-3.5 text-muted-foreground" />
               Device Config
+              <div className="ml-auto flex items-center gap-2">
+                <span className="text-xs font-normal text-muted-foreground">Auto-Response</span>
+                <Switch checked={autoResponseEnabled} onCheckedChange={setAutoResponseEnabled} />
+              </div>
             </CardTitle>
           </CardHeader>
           <CardContent className="p-4 pt-2 space-y-3">
@@ -611,6 +623,18 @@ export default function WorkspacePage({
             <p className="text-[11px] text-yellow-400/80 bg-yellow-400/5 border border-yellow-400/15 rounded px-2 py-1.5">
               Credentials are stored unencrypted. Restrict access to this workspace accordingly.
             </p>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Device Description</label>
+              <Input
+                className="h-8 text-xs"
+                placeholder="e.g. FortiGate 60F running FortiOS 7.4"
+                value={deviceDescription}
+                onChange={(e) => setDeviceDescription(e.target.value)}
+              />
+              <p className="text-[10px] text-muted-foreground">
+                Describe the device type, model, and OS version. The auto-response system uses this to generate correct CLI commands.
+              </p>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <label className="text-xs text-muted-foreground">Host / IP</label>

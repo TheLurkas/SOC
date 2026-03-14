@@ -82,6 +82,8 @@ export class WorkspacesController {
         devicePort: body.devicePort ?? workspace.devicePort,
         deviceUser: body.deviceUser ?? workspace.deviceUser,
         devicePassword: body.devicePassword ?? workspace.devicePassword,
+        deviceDescription: body.deviceDescription ?? workspace.deviceDescription,
+        autoResponseEnabled: body.autoResponseEnabled ?? workspace.autoResponseEnabled,
       },
     });
 

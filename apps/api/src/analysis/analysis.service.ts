@@ -261,6 +261,7 @@ INSTRUCTIONS:
     });
 
     // create alerts and mark logs as analyzed in a transaction
+    const createdAlertIds: string[] = [];
     await this.prisma.$transaction(async (tx) => {
       for (const alert of alerts) {
         const validSeverities = ['low', 'medium', 'high', 'critical'];
@@ -278,11 +279,9 @@ INSTRUCTIONS:
           },
         });
 
+        createdAlertIds.push(created.id);
         this.events.emitAlertCreated({ alertId: created.id, workspaceId });
         this.logger.log(`Alert created: [${severity}] ${alert.title}`);
-
-        // fire-and-forget — don't block the transaction
-        void this.autoResponse.generate(created.id, workspaceId);
       }
 
       await tx.log.updateMany({
@@ -290,6 +289,11 @@ INSTRUCTIONS:
         data: { analyzed: true },
       });
     });
+
+    // trigger auto-response after transaction commits so the alert is visible
+    for (const alertId of createdAlertIds) {
+      void this.autoResponse.generate(alertId, workspaceId);
+    }
 
     // record usage outside the transaction
     await this.recordUsage(result, workspaceId, workspace?.companyId || null);

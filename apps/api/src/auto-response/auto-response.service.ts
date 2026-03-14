@@ -44,8 +44,13 @@ export class AutoResponseService {
   }
 
   private async _generate(alertId: string, workspaceId: string): Promise<void> {
+    this.logger.log(`Auto-response triggered for alert ${alertId} in workspace ${workspaceId}`);
+
     const { apiKey } = getOpenAiConfig();
-    if (!apiKey) return;
+    if (!apiKey) {
+      this.logger.warn('No OPENAI_API_KEY set — skipping auto-response');
+      return;
+    }
 
     const [alert, workspace] = await Promise.all([
       this.prisma.alert.findUnique({
@@ -62,25 +67,23 @@ export class AutoResponseService {
           devicePort: true,
           deviceUser: true,
           devicePassword: true,
+          deviceDescription: true,
         },
       }),
     ]);
 
-    if (!alert || !workspace) return;
-
-    // get dominant vendor from recent logs in this workspace
-    const recentLogs = await this.prisma.log.findMany({
-      where: { workspaceId },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-      select: { vendor: true },
-    });
-
-    const vendorCounts: Record<string, number> = {};
-    for (const l of recentLogs) {
-      vendorCounts[l.vendor] = (vendorCounts[l.vendor] || 0) + 1;
+    if (!alert) {
+      this.logger.warn(`Alert ${alertId} not found in DB — cannot generate auto-response`);
+      return;
     }
-    const vendor = Object.entries(vendorCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'generic';
+    if (!workspace) {
+      this.logger.warn(`Workspace ${workspaceId} not found in DB — cannot generate auto-response`);
+      return;
+    }
+
+    this.logger.log(`Workspace config: autoResponseEnabled=${workspace.autoResponseEnabled}, deviceHost=${workspace.deviceHost || 'null'}, deviceUser=${workspace.deviceUser || 'null'}, deviceDescription=${workspace.deviceDescription || 'null'}`);
+
+    const deviceDesc = workspace.deviceDescription || 'generic Linux server';
 
     const systemPrompt = `You are an automated SOC incident response system. Based on an alert, you generate specific CLI commands to run on the affected network device to contain or mitigate the threat.
 
@@ -97,13 +100,27 @@ You must respond with a JSON object in this exact format:
   ]
 }
 
-VENDOR: ${vendor}
-Generate commands using the correct CLI syntax for this vendor. For FortiGate use FortiOS CLI. For PaloAlto use PAN-OS CLI. For Cisco use IOS/ASA CLI. For generic/unknown use iptables/ipset Linux commands.
+TARGET DEVICE: ${deviceDesc}
+Generate commands using the correct CLI syntax for the device described above. Use the exact command format and syntax that this device supports.
 
-Rules:
+CRITICAL RULES FOR COMMAND GENERATION:
+- Every setting must be explicitly set in the command — NEVER rely on device defaults. For example, if blocking traffic you must explicitly set "action deny", not assume the device defaults to deny.
+- Do NOT create duplicate commands that target the same IP/host/user. One address object and one policy per target is enough.
+- For firewall block rules: always explicitly set action (deny/drop), source/destination interfaces, source/destination addresses, schedule, and service. Leave nothing to defaults.
+- For FortiGate/FortiOS specifically:
+  * Always include "set action deny" in firewall policies — the default is accept
+  * Use "set srcintf any" and "set dstintf any" unless the device description specifies exact interfaces
+  * Create exactly ONE address object and ONE deny policy per target — no duplicates
+  * Include "set logtraffic all" to ensure blocked traffic is logged
+  * FortiGate has TWO policy tables — you must understand the difference:
+    - "config firewall policy" — controls FORWARDED traffic (traffic passing through the FortiGate between interfaces). Use this when blocking an IP from reaching hosts behind the FortiGate.
+    - "config firewall local-in-policy" — controls traffic destined TO the FortiGate itself (SSH, HTTPS management, ping, SNMP, etc.). Use this when the alert shows an IP attacking or scanning the FortiGate's own management IP. Local-in policies use "set srcaddr", "set dstaddr" (use the FortiGate's own address or "all"), "set intf" (incoming interface or "any"), "set action deny", "set schedule always", "set service ALL".
+    - The device's management IP is provided in the alert context as "Device Management IP". If the alert's destination IP matches the management IP, is on the same subnet, or is a broadcast/multicast address on that subnet, the attacker is targeting the FortiGate itself — create BOTH a local-in-policy AND a firewall policy to fully block the source.
+    - If the destination is clearly a host behind the FortiGate (different subnet), a firewall policy alone is sufficient.
+  * When using "edit 0" to create a new policy, FortiGate auto-assigns the next available ID. You cannot know the ID in advance, so do NOT include a "move" command — the policy will be evaluated in order.
 - Only generate commands that are safe and reversible where possible
 - Order commands by priority (most critical first)
-- If the vendor is unknown, default to Linux iptables commands
+- If the device type is unclear, default to Linux iptables commands
 - Keep commands concise and precise — these will be executed directly via SSH
 - Return ONLY valid JSON, no markdown`;
 
@@ -111,12 +128,15 @@ Rules:
 Severity: ${alert.severity}
 Description: ${alert.description}
 Source IP: ${alert.sourceIp || 'unknown'}
-Destination IP: ${alert.destinationIp || 'unknown'}`;
+Destination IP: ${alert.destinationIp || 'unknown'}
+Device Management IP: ${workspace.deviceHost || 'unknown'}`;
 
     const messages: LlmMessage[] = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userMsg },
     ];
+
+    this.logger.log(`Calling LLM for auto-response (alert: "${alert.title}", severity: ${alert.severity}, device: ${deviceDesc})`);
 
     const { baseUrl, model } = getOpenAiConfig();
     const res = await fetch(`${baseUrl}/chat/completions`, {
@@ -162,17 +182,23 @@ Destination IP: ${alert.destinationIp || 'unknown'}`;
       return;
     }
 
-    if (!parsed.commands?.length) return;
+    if (!parsed.commands?.length) {
+      this.logger.warn(`LLM returned no commands for alert ${alertId}`);
+      return;
+    }
+
+    this.logger.log(`LLM generated ${parsed.commands.length} command(s): ${parsed.commands.map((c) => `${c.type}→${c.target}`).join(', ')}`);
 
     // auto-execute if enabled and device is configured, else recommended
     const canExecute = workspace.autoResponseEnabled && !!workspace.deviceHost && !!workspace.deviceUser;
     const responseStatus = canExecute ? 'pending' : 'recommended';
+    this.logger.log(`Execution mode: canExecute=${canExecute} (enabled=${workspace.autoResponseEnabled}, host=${!!workspace.deviceHost}, user=${!!workspace.deviceUser}) → status=${responseStatus}`);
 
     const autoResponse = await this.prisma.autoResponse.create({
       data: {
         alertId,
         workspaceId,
-        vendor,
+        vendor: deviceDesc,
         reasoning: parsed.reasoning || '',
         status: responseStatus,
         commands: {
@@ -189,7 +215,7 @@ Destination IP: ${alert.destinationIp || 'unknown'}`;
     });
 
     this.events.emitAutoResponseUpdated(workspaceId, alertId);
-    this.logger.log(`Auto-response created for alert ${alertId} (${responseStatus}, vendor: ${vendor})`);
+    this.logger.log(`Auto-response created for alert ${alertId} (${responseStatus}, device: ${deviceDesc})`);
 
     // if no device configured but autoResponseEnabled, warn
     if (workspace.autoResponseEnabled && !workspace.deviceHost) {
