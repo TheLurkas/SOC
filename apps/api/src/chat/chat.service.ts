@@ -446,7 +446,7 @@ GUIDELINES:
 
     const messages: LlmMessage[] = [
       { role: 'system', content: systemPrompt },
-      ...history.slice(-10),
+      ...history,
       { role: 'user', content: userMessage },
     ];
 
