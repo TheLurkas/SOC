@@ -370,3 +370,43 @@ export interface MentionSuggestionDto {
   id: string;
   name: string;
 }
+
+// ── Report DTOs ───────────────────────────────────────────────
+
+export interface GenerateReportDto {
+  companies: {
+    id: string;
+    workspaceIds?: string[];
+  }[];
+  periodFrom?: string;
+  periodTo?: string;
+}
+
+export interface ReportWorkspaceDto {
+  name: string;
+  totalLogs: number;
+  severityBreakdown: { critical: number; high: number; medium: number; low: number };
+  topThreats: string[];
+  topSourceIps: { ip: string; count: number }[];
+  topDestinationIps: { ip: string; count: number }[];
+  findings: string;
+  recommendations: string[];
+}
+
+export interface ReportCompanyDto {
+  name: string;
+  workspaces: ReportWorkspaceDto[];
+  companySummary: string;
+  companyRiskLevel: 'low' | 'medium' | 'high' | 'critical';
+}
+
+export interface SecurityReportDto {
+  title: string;
+  generatedAt: string;
+  period: { from: string; to: string };
+  executiveSummary: string;
+  overallRiskLevel: 'low' | 'medium' | 'high' | 'critical';
+  companies: ReportCompanyDto[];
+  recommendations: string[];
+  conclusion: string;
+}

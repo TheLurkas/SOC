@@ -41,6 +41,17 @@ const PURPOSE_COLORS: Record<string, string> = {
   answer: "oklch(0.72 0.15 155)",
   title: "oklch(0.75 0.15 70)",
   auto_response: "oklch(0.65 0.20 25)",
+  report: "oklch(0.68 0.15 300)",
+  alert_analysis: "oklch(0.70 0.18 40)",
+};
+
+const PURPOSE_LABELS: Record<string, string> = {
+  query: "Log Query",
+  answer: "Chat Response",
+  title: "Title Generation",
+  auto_response: "Auto Response",
+  report: "Report Generation",
+  alert_analysis: "Alert Analysis",
 };
 
 const COMPANY_COLORS = [
@@ -53,10 +64,12 @@ const COMPANY_COLORS = [
 ];
 
 const purposeConfig: ChartConfig = {
-  query: { label: "Query", color: PURPOSE_COLORS.query },
-  answer: { label: "Answer", color: PURPOSE_COLORS.answer },
-  title: { label: "Title", color: PURPOSE_COLORS.title },
-  auto_response: { label: "Auto Response", color: PURPOSE_COLORS.auto_response },
+  query: { label: PURPOSE_LABELS.query, color: PURPOSE_COLORS.query },
+  answer: { label: PURPOSE_LABELS.answer, color: PURPOSE_COLORS.answer },
+  title: { label: PURPOSE_LABELS.title, color: PURPOSE_COLORS.title },
+  auto_response: { label: PURPOSE_LABELS.auto_response, color: PURPOSE_COLORS.auto_response },
+  report: { label: PURPOSE_LABELS.report, color: PURPOSE_COLORS.report },
+  alert_analysis: { label: PURPOSE_LABELS.alert_analysis, color: PURPOSE_COLORS.alert_analysis },
 };
 
 function formatCost(usd: number): string {
@@ -173,7 +186,7 @@ export default function UsagePage() {
               <PieChart>
                 <ChartTooltip content={<ChartTooltipContent />} />
                 <Pie
-                  data={data.byPurpose.map((p) => ({ name: p.purpose, value: p.costUsd }))}
+                  data={data.byPurpose.map((p) => ({ name: PURPOSE_LABELS[p.purpose] || p.purpose, value: p.costUsd }))}
                   dataKey="value"
                   nameKey="name"
                   cx="50%"
@@ -262,7 +275,7 @@ export default function UsagePage() {
               <tbody>
                 {data.byPurpose.map((p) => (
                   <tr key={p.purpose} className="border-b border-border/50">
-                    <td className="p-2 font-mono">{p.purpose}</td>
+                    <td className="p-2">{PURPOSE_LABELS[p.purpose] || p.purpose}</td>
                     <td className="p-2 text-right font-mono">{p.calls}</td>
                     <td className="p-2 text-right font-mono">{formatTokens(p.tokens)}</td>
                     <td className="p-2 text-right font-mono">{formatCost(p.costUsd)}</td>
@@ -343,9 +356,11 @@ export default function UsagePage() {
                           r.purpose === 'answer' ? 'bg-emerald-500/15 text-emerald-400'
                           : r.purpose === 'query' ? 'bg-blue-500/15 text-blue-400'
                           : r.purpose === 'title' ? 'bg-yellow-500/15 text-yellow-400'
+                          : r.purpose === 'report' ? 'bg-purple-500/15 text-purple-400'
+                          : r.purpose === 'alert_analysis' ? 'bg-orange-500/15 text-orange-400'
                           : 'bg-red-500/15 text-red-400'
                         }`}>
-                          {r.purpose}
+                          {PURPOSE_LABELS[r.purpose] || r.purpose}
                         </span>
                       </td>
                       <td className="p-2 font-mono">{r.model}</td>

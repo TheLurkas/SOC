@@ -45,6 +45,22 @@ const actionLabels: Record<string, string> = {
   note_added: "Note added",
 };
 
+// how long an open alert can sit before it's flagged as overdue (minutes)
+const OVERDUE_THRESHOLDS: Record<string, number> = {
+  critical: 15,
+  high: 60,
+  medium: 240,
+  low: 1440,
+};
+
+function isOverdue(alert: AlertDto): boolean {
+  if (alert.status !== "open") return false;
+  const threshold = OVERDUE_THRESHOLDS[alert.severity];
+  if (!threshold) return false;
+  const ageMs = Date.now() - new Date(alert.createdAt).getTime();
+  return ageMs > threshold * 60 * 1000;
+}
+
 type PageTab = "alerts" | "activity";
 type ViewTab = "all" | "unassigned" | "mine";
 
@@ -399,11 +415,17 @@ export default function AlertsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {alerts.map((alert) => (
+                  {alerts.map((alert) => {
+                    const overdue = isOverdue(alert);
+                    return (
                     <tr
                       key={alert.id}
                       className={`border-b border-border last:border-0 hover:bg-secondary/10 transition-colors cursor-pointer ${
-                        alert.assigneeId === currentUserId ? "bg-secondary/5 border-l-2 border-l-blue-400/50" : ""
+                        overdue
+                          ? "bg-red-500/10 border-l-2 border-l-red-500"
+                          : alert.assigneeId === currentUserId
+                          ? "bg-secondary/5 border-l-2 border-l-blue-400/50"
+                          : ""
                       }`}
                       onClick={() => setSelectedAlert(alert)}
                     >
@@ -440,7 +462,8 @@ export default function AlertsPage() {
                         {new Date(alert.createdAt).toLocaleDateString()}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

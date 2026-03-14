@@ -26,6 +26,7 @@ import {
 import { Star, Search, Globe, AlertTriangle, Activity, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { CreateCompanyDialog } from "@/components/create-company-dialog";
+import { GenerateReportDialog } from "@/components/generate-report-dialog";
 import api from "@/lib/api";
 import { useGlobalSocket } from "@/lib/socket";
 import type { CompanyDto, AlertStatsDto, DashboardStatsDto } from "@soc/shared";
@@ -154,22 +155,25 @@ export default function Dashboard() {
     <div className="p-6 space-y-4 max-w-[1600px] mx-auto">
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold">Dashboard</h1>
-        <div className="flex items-center gap-4 text-xs text-muted-foreground">
-          <div className="flex items-center gap-1.5">
-            <div className="size-2 rounded-full bg-blue-400" />
-            <span>Low</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <div className="size-2 rounded-full bg-yellow-400" />
-            <span>Medium</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <div className="size-2 rounded-full bg-orange-400" />
-            <span>High</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <div className="size-2 rounded-full bg-red-400" />
-            <span>Critical</span>
+        <div className="flex items-center gap-4">
+          <GenerateReportDialog companies={companies} />
+          <div className="flex items-center gap-4 text-xs text-muted-foreground">
+            <div className="flex items-center gap-1.5">
+              <div className="size-2 rounded-full bg-blue-400" />
+              <span>Low</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <div className="size-2 rounded-full bg-yellow-400" />
+              <span>Medium</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <div className="size-2 rounded-full bg-orange-400" />
+              <span>High</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <div className="size-2 rounded-full bg-red-400" />
+              <span>Critical</span>
+            </div>
           </div>
         </div>
       </div>
