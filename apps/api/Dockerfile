@@ -35,7 +35,7 @@ COPY pnpm-workspace.yaml package.json ./
 WORKDIR /app/apps/api
 
 COPY apps/api/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 EXPOSE 3001
 CMD ["/entrypoint.sh"]
